@@ -421,6 +421,7 @@ OBJS-$(CONFIG_NOISE_FILTER)                  += vf_noise.o
 OBJS-$(CONFIG_NORMALIZE_FILTER)              += vf_normalize.o
 OBJS-$(CONFIG_NULL_FILTER)                   += vf_null.o
 OBJS-$(CONFIG_NVVFX_FILTER)                  += vf_nvvfx.o
+OBJS-$(CONFIG_NVVFX_FRAMEGEN_FILTER)         += vf_nvvfx_framegen.o framesync.o
 OBJS-$(CONFIG_OCR_FILTER)                    += vf_ocr.o
 OBJS-$(CONFIG_OCV_FILTER)                    += vf_libopencv.o
 OBJS-$(CONFIG_OCIO_FILTER)                   += vf_opencolorio.o ocio_wrapper.o

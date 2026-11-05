@@ -20,6 +20,7 @@
 #include "libavutil/avstring.h"
 #include "libavutil/mem.h"
 #include "libavutil/pixdesc.h"
+#include "libavutil/mastering_display_metadata.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,6 +30,7 @@
 #include <initguid.h>
 #include <d3d11.h>
 #include <d3d11_1.h>
+#include <d3dcommon.h>
 
 #include "libavutil/hwcontext.h"
 #include "libavutil/hwcontext_d3d11va.h"
@@ -67,19 +69,23 @@ struct NvVFX_Object;
 typedef struct NvVFX_Object *NvVFX_Handle;
 
 enum {
-    NVCV_BGR    = 5,
-    NVCV_RGBA   = 6,
-    NVCV_BGRA   = 7,
-    NVCV_U8     = 1,
-    NVCV_F32    = 7,
-    NVCV_CHUNKY = 0,
-    NVCV_PLANAR = 1,
-    NVCV_GPU    = 1,
+    NVCV_BGR     = 5,
+    NVCV_RGBA    = 6,
+    NVCV_BGRA    = 7,
+    NVCV_RGB10A2 = 13,
+    NVCV_U8      = 1,
+    NVCV_U16     = 2,
+    NVCV_F32     = 7,
+    NVCV_P32     = 11,
+    NVCV_CHUNKY  = 0,
+    NVCV_PLANAR  = 1,
+    NVCV_GPU     = 1,
 };
 
 typedef NvCV_Status (__cdecl *PFN_NvVFX_CreateEffect)(const char *, NvVFX_Handle *);
 typedef void (__cdecl *PFN_NvVFX_DestroyEffect)(NvVFX_Handle);
 typedef NvCV_Status (__cdecl *PFN_NvVFX_SetU32)(NvVFX_Handle, const char *, unsigned int);
+typedef NvCV_Status (__cdecl *PFN_NvVFX_SetF32)(NvVFX_Handle, const char *, float);
 typedef NvCV_Status (__cdecl *PFN_NvVFX_SetString)(NvVFX_Handle, const char *, const char *);
 typedef NvCV_Status (__cdecl *PFN_NvVFX_SetImage)(NvVFX_Handle, const char *, NvCVImage *);
 typedef NvCV_Status (__cdecl *PFN_NvVFX_SetCudaStream)(NvVFX_Handle, const char *, CUstream);
@@ -101,18 +107,38 @@ typedef NvCV_Status (__cdecl *PFN_NvCVImage_MapResource)(NvCVImage *, CUstream);
 typedef NvCV_Status (__cdecl *PFN_NvCVImage_UnmapResource)(NvCVImage *, CUstream);
 typedef const char *(__cdecl *PFN_NvCV_GetErrorStringFromCode)(NvCV_Status);
 
+/* D3DCompile is resolved at runtime from d3dcompiler_47.dll; the filter does
+ * not link against d3dcompiler. */
+typedef HRESULT (WINAPI *PFN_D3DCompile)(const void *data, SIZE_T data_size,
+                                         const char *filename,
+                                         const D3D_SHADER_MACRO *defines,
+                                         ID3DInclude *include,
+                                         const char *entrypoint,
+                                         const char *target, UINT sflags,
+                                         UINT eflags, ID3DBlob **shader,
+                                         ID3DBlob **error_messages);
+
 #define NVVFX_INPUT_IMAGE  "SrcImage0"
 #define NVVFX_OUTPUT_IMAGE "DstImage0"
 #define NVVFX_CUDA_STREAM  "CudaStream"
 #define NVVFX_QUALITY      "QualityLevel"
+#define NVVFX_STRENGTH     "Strength"
+#define NVVFX_ENCODING     "ImageEncodingMode"
 #define NVVFX_MODE         "Mode"
 #define NVVFX_MODEL_DIR    "ModelDir"
+
+#define NVVFX_CONTRAST      "Contrast"
+#define NVVFX_SATURATION    "Saturation"
+#define NVVFX_MIDDLE_GRAY   "MiddleGray"
+#define NVVFX_LUMINANCE     "Luminance"
+#define NVVFX_DEBANDING_OFF "DebandingOff"
 
 enum NVVFXMode {
     MODE_SUPERRES,
     MODE_DENOISE,
     MODE_DEBLUR,
     MODE_ARTIFACT,
+    MODE_HDR,
     MODE_NB
 };
 
@@ -130,6 +156,13 @@ typedef struct NVVFXContext {
     int mode;
     int quality;
     int scale;
+    int bit_depth;
+    float strength;
+    int contrast;
+    int saturation;
+    int middle_gray;
+    int luminance;
+    int debanding_off;
     char *lib_dir;
     char *dep_dir;
 
@@ -140,6 +173,9 @@ typedef struct NVVFXContext {
     ID3D11VideoProcessorEnumerator *vp_enum;
     ID3D11VideoProcessor *vp;
     ID3D11VideoProcessorOutputView *vp_out_view;
+    ID3D11VideoProcessorEnumerator *vp_out_enum;
+    ID3D11VideoProcessor *vp_out;
+    ID3D11VideoProcessorOutputView *vp_out_p010_view;
 
     AVBufferRef *hw_device_ctx;
     AVBufferRef *hw_frames_ctx_out;
@@ -152,10 +188,12 @@ typedef struct NVVFXContext {
     HMODULE h_ngxruntime;
     HMODULE h_feature;
     HMODULE h_vsr;
+    HMODULE h_d3dcompiler;
 
     PFN_NvVFX_CreateEffect CreateEffect;
     PFN_NvVFX_DestroyEffect DestroyEffect;
     PFN_NvVFX_SetU32 SetU32;
+    PFN_NvVFX_SetF32 SetF32;
     PFN_NvVFX_SetString SetString;
     PFN_NvVFX_SetImage SetImage;
     PFN_NvVFX_SetCudaStream SetCudaStream;
@@ -181,12 +219,30 @@ typedef struct NVVFXContext {
     ID3D11Texture2D *in_yuv_tex;
     ID3D11Texture2D *in_copy_tex;
     ID3D11Texture2D *out_tex;
+    ID3D11Texture2D *in_r10_tex;
+    ID3D11Texture2D *in_u16_tex;
+    ID3D11Texture2D *out_u16_tex;
+    ID3D11Texture2D *out_r10_tex;
+    ID3D11Texture2D *out_p010_tex;
     ID3D11Query *sync_query;
+
+    ID3D11ShaderResourceView *in_r10_srv;
+    ID3D11ShaderResourceView *out_u16_srv;
+    ID3D11RenderTargetView *in_u16_rtv;
+    ID3D11RenderTargetView *out_r10_rtv;
+    ID3D11VertexShader *bridge_vs;
+    ID3D11PixelShader *bridge_ps;
+
     NvCVImage in_d3d;
     NvCVImage in_copy_d3d;
     NvCVImage out_d3d;
+    NvCVImage in_u16_d3d;
+    NvCVImage out_u16_d3d;
     NvCVImage in_gpu;
     NvCVImage out_gpu;
+    NvCVImage in_u16_gpu;
+    NvCVImage out_u16_gpu;
+    NvCVImage hdr_in_gpu;
     NvCVImage in_f32;
     NvCVImage out_f32;
 
@@ -203,7 +259,220 @@ typedef struct NVVFXContext {
 
 static av_cold int nvvfx_init(AVFilterContext *ctx)
 {
+    NVVFXContext *s = ctx->priv;
+
+    if (s->mode == MODE_ARTIFACT && s->bit_depth != 8) {
+        av_log(ctx, AV_LOG_ERROR, "nvvfx: bit_depth is only supported for "
+               "superres/denoise/deblur and hdr.\n");
+        return AVERROR(EINVAL);
+    }
+
+    if (s->bit_depth != 8 && s->bit_depth != 10) {
+        av_log(ctx, AV_LOG_ERROR, "nvvfx: bit_depth must be 8 or 10.\n");
+        return AVERROR(EINVAL);
+    }
+
     return 0;
+}
+
+static int nvvfx_hdr_mode(const NVVFXContext *s)
+{
+    return s->mode == MODE_HDR;
+}
+
+/* True RGB10A2 VSR: RGB10A2 inputs/outputs and the D3D11 shader bridge. */
+static int nvvfx_10bit_mode(const NVVFXContext *s)
+{
+    return s->mode != MODE_ARTIFACT && s->mode != MODE_HDR &&
+           s->bit_depth == 10;
+}
+
+static int nvvfx_input_needs_vp(const NVVFXContext *s)
+{
+    if (s->mode == MODE_HDR)
+        return s->in_sw_format == AV_PIX_FMT_NV12 ||
+               s->in_sw_format == AV_PIX_FMT_P010 ||
+               s->in_sw_format == AV_PIX_FMT_X2BGR10;
+
+    if (nvvfx_10bit_mode(s))
+        return s->in_sw_format == AV_PIX_FMT_P010;
+
+    return s->in_sw_format == AV_PIX_FMT_NV12 ||
+           s->in_sw_format == AV_PIX_FMT_P010;
+}
+
+/* One fullscreen triangle vertex shader with SV_VertexID and one pixel shader
+ * that just Load()s texel (x, y). The same shader converts both directions:
+ * R10G10B10A2_UNORM -> R16G16B16A16_UNORM and back (10 <-> 16 bits is exact
+ * for the scale factor the NvCVImage transfer uses). Alpha is forced opaque
+ * (1.0 -> the 2-bit RGB10A2 alpha becomes 3). */
+static const char nvvfx_bridge_hlsl[] =
+    "struct VSOut { float4 pos : SV_Position; };\n"
+    "VSOut VS(uint id : SV_VertexID)\n"
+    "{\n"
+    "    VSOut o;\n"
+    "    float2 uv = float2((id << 1) & 2, id & 2);\n"
+    "    o.pos = float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);\n"
+    "    return o;\n"
+    "}\n"
+    "Texture2D<float4> Src : register(t0);\n"
+    "float4 PS(VSOut i) : SV_Target\n"
+    "{\n"
+    "    float4 c = Src.Load(int3((int2)i.pos.xy, 0));\n"
+    "    return float4(c.rgb, 1.0);\n"
+    "}\n";
+
+static int bridge_ensure(AVFilterContext *ctx, NVVFXContext *s)
+{
+    PFN_D3DCompile compile;
+    ID3DBlob *vs_blob = NULL;
+    ID3DBlob *ps_blob = NULL;
+    ID3DBlob *err = NULL;
+    HRESULT hr;
+
+    if (s->bridge_vs && s->bridge_ps)
+        return 0;
+
+    if (!s->h_d3dcompiler) {
+        s->h_d3dcompiler = LoadLibraryA("d3dcompiler_47.dll");
+        if (!s->h_d3dcompiler) {
+            av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to load d3dcompiler_47.dll "
+                   "(needed for the RGB10A2 bridge).\n");
+            return AVERROR_EXTERNAL;
+        }
+    }
+
+    compile = (PFN_D3DCompile)GetProcAddress(s->h_d3dcompiler, "D3DCompile");
+    if (!compile) {
+        av_log(ctx, AV_LOG_ERROR, "nvvfx: d3dcompiler_47.dll has no D3DCompile.\n");
+        return AVERROR_EXTERNAL;
+    }
+
+    hr = compile(nvvfx_bridge_hlsl, sizeof(nvvfx_bridge_hlsl) - 1,
+                 "nvvfx_bridge", NULL, NULL, "VS", "vs_4_0", 0, 0,
+                 &vs_blob, &err);
+    if (FAILED(hr)) {
+        av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to compile the bridge vertex "
+               "shader: %s\n", err ? (const char *)err->lpVtbl->GetBufferPointer(err) :
+               "unknown error");
+        if (err)
+            err->lpVtbl->Release(err);
+        return AVERROR_EXTERNAL;
+    }
+    if (err) {
+        err->lpVtbl->Release(err);
+        err = NULL;
+    }
+
+    hr = compile(nvvfx_bridge_hlsl, sizeof(nvvfx_bridge_hlsl) - 1,
+                 "nvvfx_bridge", NULL, NULL, "PS", "ps_4_0", 0, 0,
+                 &ps_blob, &err);
+    if (FAILED(hr)) {
+        av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to compile the bridge pixel "
+               "shader: %s\n", err ? (const char *)err->lpVtbl->GetBufferPointer(err) :
+               "unknown error");
+        if (err)
+            err->lpVtbl->Release(err);
+        vs_blob->lpVtbl->Release(vs_blob);
+        return AVERROR_EXTERNAL;
+    }
+    if (err) {
+        err->lpVtbl->Release(err);
+        err = NULL;
+    }
+
+    hr = s->device->lpVtbl->CreateVertexShader(s->device,
+                                               vs_blob->lpVtbl->GetBufferPointer(vs_blob),
+                                               vs_blob->lpVtbl->GetBufferSize(vs_blob),
+                                               NULL, &s->bridge_vs);
+    if (SUCCEEDED(hr))
+        hr = s->device->lpVtbl->CreatePixelShader(s->device,
+                                                  ps_blob->lpVtbl->GetBufferPointer(ps_blob),
+                                                  ps_blob->lpVtbl->GetBufferSize(ps_blob),
+                                                  NULL, &s->bridge_ps);
+    vs_blob->lpVtbl->Release(vs_blob);
+    ps_blob->lpVtbl->Release(ps_blob);
+
+    if (FAILED(hr)) {
+        av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to create the bridge shaders "
+               "(HRESULT 0x%lX).\n", hr);
+        return AVERROR_EXTERNAL;
+    }
+    return 0;
+}
+
+static int bridge_views(NVVFXContext *s)
+{
+    D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {
+        .ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D,
+        .Texture2D = { .MipLevels = 1 },
+    };
+    D3D11_RENDER_TARGET_VIEW_DESC rtv_desc = {
+        .ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D,
+        .Texture2D = { .MipSlice = 0 },
+    };
+    HRESULT hr;
+
+    if (s->in_r10_tex) {
+        srv_desc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
+        hr = s->device->lpVtbl->CreateShaderResourceView(s->device,
+                                                         (ID3D11Resource *)s->in_r10_tex,
+                                                         &srv_desc, &s->in_r10_srv);
+        if (FAILED(hr))
+            return AVERROR_EXTERNAL;
+
+        rtv_desc.Format = DXGI_FORMAT_R16G16B16A16_UNORM;
+        hr = s->device->lpVtbl->CreateRenderTargetView(s->device,
+                                                       (ID3D11Resource *)s->in_u16_tex,
+                                                       &rtv_desc, &s->in_u16_rtv);
+        if (FAILED(hr))
+            return AVERROR_EXTERNAL;
+    }
+
+    if (s->out_u16_tex) {
+        srv_desc.Format = DXGI_FORMAT_R16G16B16A16_UNORM;
+        hr = s->device->lpVtbl->CreateShaderResourceView(s->device,
+                                                         (ID3D11Resource *)s->out_u16_tex,
+                                                         &srv_desc, &s->out_u16_srv);
+        if (FAILED(hr))
+            return AVERROR_EXTERNAL;
+
+        rtv_desc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
+        hr = s->device->lpVtbl->CreateRenderTargetView(s->device,
+                                                       (ID3D11Resource *)s->out_r10_tex,
+                                                       &rtv_desc, &s->out_r10_rtv);
+        if (FAILED(hr))
+            return AVERROR_EXTERNAL;
+    }
+
+    return 0;
+}
+
+static void bridge_draw(NVVFXContext *s, ID3D11ShaderResourceView *srv,
+                        ID3D11RenderTargetView *rtv, int width, int height)
+{
+    D3D11_VIEWPORT viewport = {
+        .TopLeftX = 0.0f,
+        .TopLeftY = 0.0f,
+        .Width = (FLOAT)width,
+        .Height = (FLOAT)height,
+        .MinDepth = 0.0f,
+        .MaxDepth = 1.0f,
+    };
+    ID3D11ShaderResourceView *null_srv = NULL;
+    ID3D11RenderTargetView *null_rtv = NULL;
+    ID3D11DeviceContext *dc = s->device_ctx;
+
+    dc->lpVtbl->IASetInputLayout(dc, NULL);
+    dc->lpVtbl->IASetPrimitiveTopology(dc, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    dc->lpVtbl->RSSetViewports(dc, 1, &viewport);
+    dc->lpVtbl->OMSetRenderTargets(dc, 1, &rtv, NULL);
+    dc->lpVtbl->VSSetShader(dc, s->bridge_vs, NULL, 0);
+    dc->lpVtbl->PSSetShader(dc, s->bridge_ps, NULL, 0);
+    dc->lpVtbl->PSSetShaderResources(dc, 0, 1, &srv);
+    dc->lpVtbl->Draw(dc, 3, 0);
+    dc->lpVtbl->PSSetShaderResources(dc, 0, 1, &null_srv);
+    dc->lpVtbl->OMSetRenderTargets(dc, 1, &null_rtv, NULL);
 }
 
 static const char *vfx_err(NVVFXContext *s, NvCV_Status status)
@@ -280,13 +549,26 @@ static int vfx_load_libs(AVFilterContext *ctx, NVVFXContext *s)
             return AVERROR_EXTERNAL;
         }
     } else {
+        /* 10-bit VSR and TrueHDR need the NvCVImage.dll shipped with the
+         * NVIDIA VFX 0.2.0.0 wheel: only that build accommodates the packed
+         * NVCV_RGB10A2 (pixelFormat 13) / NVCV_P32 (componentType 11) images.
+         * Keep the legacy deps/models from dep_dir loaded first; they are
+         * compatible. A process can only have one NVCVImage.dll (Windows
+         * loads modules by base name), so a process that already loaded the
+         * old 8-bit NVCVImage cannot switch to the 0.2.0.0 one (or vice
+         * versa). Do not mix old and new NVCVImage in one process. */
         char dirs[5][NVVFX_MAX_PATH] = { 0 };
         char exe_dir[MAX_PATH];
+        const char *feature_dll = s->mode == MODE_HDR ?
+                                  "nvVFXTrueHDR.dll" : "nvVFXVideoSuperRes.dll";
+        const char *ngx_dll = s->mode == MODE_HDR ?
+                              "nvngx_truehdr.dll" : "nvngx_vsr.dll";
         const char *lib_dir = NULL;
         const char *dep_source;
         const char *env_dir;
         int nb_dirs = 0;
         int have_old;
+        int want_new_nvcv = s->mode == MODE_HDR || nvvfx_10bit_mode(s);
 
         if (s->lib_dir && s->lib_dir[0]) {
             av_strlcpy(dirs[nb_dirs], s->lib_dir, NVVFX_MAX_PATH);
@@ -309,14 +591,15 @@ static int vfx_load_libs(AVFilterContext *ctx, NVVFXContext *s)
                  "C:\\Program Files\\NVIDIA Corporation\\NVIDIA Video Effects");
 
         for (i = 0; i < nb_dirs; i++) {
-            if (dir_has_file(dirs[i], "nvVFXVideoSuperRes.dll")) {
+            if (dir_has_file(dirs[i], feature_dll)) {
                 lib_dir = dirs[i];
                 break;
             }
         }
         if (!lib_dir) {
-            av_log(ctx, AV_LOG_ERROR, "nvvfx: could not find nvVFXVideoSuperRes.dll. "
-                   "Install the NVIDIA Video Effects SDK or set the lib_dir option.\n");
+            av_log(ctx, AV_LOG_ERROR, "nvvfx: could not find %s. Install the "
+                   "NVIDIA Video Effects SDK or set the lib_dir option.\n",
+                   feature_dll);
             return AVERROR_EXTERNAL;
         }
 
@@ -331,12 +614,23 @@ static int vfx_load_libs(AVFilterContext *ctx, NVVFXContext *s)
                 av_log(ctx, AV_LOG_VERBOSE, "nvvfx: could not load %s\n", deps[i]);
         }
 
-        s->h_nvcv = load_dll(dir_has_file(old_dir, "NVCVImage.dll") ? old_dir : lib_dir,
-                             "NVCVImage.dll");
+        if (want_new_nvcv) {
+            if (!dir_has_file(lib_dir, "NVCVImage.dll")) {
+                av_log(ctx, AV_LOG_WARNING, "nvvfx: %s requires the NVCVImage.dll "
+                       "from the NVIDIA VFX 0.2.0.0 wheel; none was found in %s.\n",
+                       s->mode == MODE_HDR ? "TrueHDR" : "10-bit VideoSuperRes",
+                       lib_dir);
+            }
+            s->h_nvcv = load_dll(dir_has_file(lib_dir, "NVCVImage.dll") ?
+                                 lib_dir : old_dir, "NVCVImage.dll");
+        } else {
+            s->h_nvcv = load_dll(dir_has_file(old_dir, "NVCVImage.dll") ?
+                                 old_dir : lib_dir, "NVCVImage.dll");
+        }
         s->h_ngxruntime = load_dll(lib_dir, "nvngxruntime.dll");
         s->h_vfx = load_dll(lib_dir, "NVVideoEffects.dll");
-        s->h_feature = load_dll(lib_dir, "nvVFXVideoSuperRes.dll");
-        s->h_vsr = load_dll(lib_dir, "nvngx_vsr.dll");
+        s->h_feature = load_dll(lib_dir, feature_dll);
+        s->h_vsr = load_dll(lib_dir, ngx_dll);
 
         if (!s->h_nvcv || !s->h_vfx || !s->h_ngxruntime || !s->h_feature || !s->h_vsr) {
             av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to load the NVIDIA Video Effects "
@@ -348,6 +642,7 @@ static int vfx_load_libs(AVFilterContext *ctx, NVVFXContext *s)
     s->CreateEffect = (PFN_NvVFX_CreateEffect)GetProcAddress(s->h_vfx, "NvVFX_CreateEffect");
     s->DestroyEffect = (PFN_NvVFX_DestroyEffect)GetProcAddress(s->h_vfx, "NvVFX_DestroyEffect");
     s->SetU32 = (PFN_NvVFX_SetU32)GetProcAddress(s->h_vfx, "NvVFX_SetU32");
+    s->SetF32 = (PFN_NvVFX_SetF32)GetProcAddress(s->h_vfx, "NvVFX_SetF32");
     s->SetString = (PFN_NvVFX_SetString)GetProcAddress(s->h_vfx, "NvVFX_SetString");
     s->SetImage = (PFN_NvVFX_SetImage)GetProcAddress(s->h_vfx, "NvVFX_SetImage");
     s->SetCudaStream = (PFN_NvVFX_SetCudaStream)GetProcAddress(s->h_vfx, "NvVFX_SetCudaStream");
@@ -368,7 +663,8 @@ static int vfx_load_libs(AVFilterContext *ctx, NVVFXContext *s)
         !s->SetCudaStream || !s->Load || !s->Run || !s->CudaStreamCreate ||
         !s->CudaStreamDestroy || !s->Alloc || !s->Dealloc || !s->Transfer ||
         !s->InitFromD3D11Texture || !s->MapResource || !s->UnmapResource ||
-        (s->mode == MODE_ARTIFACT && !s->SetString)) {
+        (s->mode == MODE_ARTIFACT && !s->SetString) ||
+        (s->mode != MODE_ARTIFACT && !s->SetF32)) {
         av_log(ctx, AV_LOG_ERROR, "nvvfx: runtime is missing required symbols.\n");
         return AVERROR_EXTERNAL;
     }
@@ -391,6 +687,18 @@ static void release_video_processor(NVVFXContext *s)
         s->vp_enum->lpVtbl->Release(s->vp_enum);
         s->vp_enum = NULL;
     }
+    if (s->vp_out_p010_view) {
+        s->vp_out_p010_view->lpVtbl->Release(s->vp_out_p010_view);
+        s->vp_out_p010_view = NULL;
+    }
+    if (s->vp_out) {
+        s->vp_out->lpVtbl->Release(s->vp_out);
+        s->vp_out = NULL;
+    }
+    if (s->vp_out_enum) {
+        s->vp_out_enum->lpVtbl->Release(s->vp_out_enum);
+        s->vp_out_enum = NULL;
+    }
 }
 
 static void vfx_destroy(NVVFXContext *s)
@@ -408,10 +716,20 @@ static void vfx_destroy(NVVFXContext *s)
             s->Dealloc(&s->in_copy_d3d);
         if (s->out_d3d.pixels || s->out_d3d.deletePtr)
             s->Dealloc(&s->out_d3d);
+        if (s->in_u16_d3d.pixels || s->in_u16_d3d.deletePtr)
+            s->Dealloc(&s->in_u16_d3d);
+        if (s->out_u16_d3d.pixels || s->out_u16_d3d.deletePtr)
+            s->Dealloc(&s->out_u16_d3d);
         if (s->in_gpu.pixels || s->in_gpu.deletePtr)
             s->Dealloc(&s->in_gpu);
         if (s->out_gpu.pixels || s->out_gpu.deletePtr)
             s->Dealloc(&s->out_gpu);
+        if (s->in_u16_gpu.pixels || s->in_u16_gpu.deletePtr)
+            s->Dealloc(&s->in_u16_gpu);
+        if (s->out_u16_gpu.pixels || s->out_u16_gpu.deletePtr)
+            s->Dealloc(&s->out_u16_gpu);
+        if (s->hdr_in_gpu.pixels || s->hdr_in_gpu.deletePtr)
+            s->Dealloc(&s->hdr_in_gpu);
         if (s->in_f32.pixels || s->in_f32.deletePtr)
             s->Dealloc(&s->in_f32);
         if (s->out_f32.pixels || s->out_f32.deletePtr)
@@ -420,10 +738,40 @@ static void vfx_destroy(NVVFXContext *s)
     memset(&s->in_d3d, 0, sizeof(s->in_d3d));
     memset(&s->in_copy_d3d, 0, sizeof(s->in_copy_d3d));
     memset(&s->out_d3d, 0, sizeof(s->out_d3d));
+    memset(&s->in_u16_d3d, 0, sizeof(s->in_u16_d3d));
+    memset(&s->out_u16_d3d, 0, sizeof(s->out_u16_d3d));
     memset(&s->in_gpu, 0, sizeof(s->in_gpu));
     memset(&s->out_gpu, 0, sizeof(s->out_gpu));
+    memset(&s->in_u16_gpu, 0, sizeof(s->in_u16_gpu));
+    memset(&s->out_u16_gpu, 0, sizeof(s->out_u16_gpu));
+    memset(&s->hdr_in_gpu, 0, sizeof(s->hdr_in_gpu));
     memset(&s->in_f32, 0, sizeof(s->in_f32));
     memset(&s->out_f32, 0, sizeof(s->out_f32));
+
+    if (s->in_r10_srv) {
+        s->in_r10_srv->lpVtbl->Release(s->in_r10_srv);
+        s->in_r10_srv = NULL;
+    }
+    if (s->out_u16_srv) {
+        s->out_u16_srv->lpVtbl->Release(s->out_u16_srv);
+        s->out_u16_srv = NULL;
+    }
+    if (s->in_u16_rtv) {
+        s->in_u16_rtv->lpVtbl->Release(s->in_u16_rtv);
+        s->in_u16_rtv = NULL;
+    }
+    if (s->out_r10_rtv) {
+        s->out_r10_rtv->lpVtbl->Release(s->out_r10_rtv);
+        s->out_r10_rtv = NULL;
+    }
+    if (s->bridge_vs) {
+        s->bridge_vs->lpVtbl->Release(s->bridge_vs);
+        s->bridge_vs = NULL;
+    }
+    if (s->bridge_ps) {
+        s->bridge_ps->lpVtbl->Release(s->bridge_ps);
+        s->bridge_ps = NULL;
+    }
 
     if (s->in_tex) {
         s->in_tex->lpVtbl->Release(s->in_tex);
@@ -440,6 +788,26 @@ static void vfx_destroy(NVVFXContext *s)
     if (s->out_tex) {
         s->out_tex->lpVtbl->Release(s->out_tex);
         s->out_tex = NULL;
+    }
+    if (s->in_r10_tex) {
+        s->in_r10_tex->lpVtbl->Release(s->in_r10_tex);
+        s->in_r10_tex = NULL;
+    }
+    if (s->in_u16_tex) {
+        s->in_u16_tex->lpVtbl->Release(s->in_u16_tex);
+        s->in_u16_tex = NULL;
+    }
+    if (s->out_u16_tex) {
+        s->out_u16_tex->lpVtbl->Release(s->out_u16_tex);
+        s->out_u16_tex = NULL;
+    }
+    if (s->out_r10_tex) {
+        s->out_r10_tex->lpVtbl->Release(s->out_r10_tex);
+        s->out_r10_tex = NULL;
+    }
+    if (s->out_p010_tex) {
+        s->out_p010_tex->lpVtbl->Release(s->out_p010_tex);
+        s->out_p010_tex = NULL;
     }
     if (s->sync_query) {
         s->sync_query->lpVtbl->Release(s->sync_query);
@@ -479,7 +847,11 @@ static int create_texture(NVVFXContext *s, int width, int height,
     return SUCCEEDED(hr) ? 0 : AVERROR_EXTERNAL;
 }
 
-static int vp_setup(AVFilterContext *ctx, NVVFXContext *s, int width, int height)
+static int vp_create(AVFilterContext *ctx, NVVFXContext *s, int width, int height,
+                     ID3D11Texture2D *target,
+                     ID3D11VideoProcessorEnumerator **vp_enum,
+                     ID3D11VideoProcessor **vp,
+                     ID3D11VideoProcessorOutputView **vp_out_view)
 {
     D3D11_VIDEO_PROCESSOR_CONTENT_DESC content = {
         .InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
@@ -500,15 +872,15 @@ static int vp_setup(AVFilterContext *ctx, NVVFXContext *s, int width, int height
     HRESULT hr;
 
     hr = s->video_device->lpVtbl->CreateVideoProcessorEnumerator(s->video_device,
-                                                                 &content, &s->vp_enum);
+                                                                 &content, vp_enum);
     if (FAILED(hr)) {
         av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to create the video processor "
                "enumerator (HRESULT 0x%lX).\n", hr);
         return AVERROR_EXTERNAL;
     }
 
-    hr = s->video_device->lpVtbl->CreateVideoProcessor(s->video_device, s->vp_enum,
-                                                       0, &s->vp);
+    hr = s->video_device->lpVtbl->CreateVideoProcessor(s->video_device, *vp_enum,
+                                                       0, vp);
     if (FAILED(hr)) {
         av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to create the video processor "
                "(HRESULT 0x%lX).\n", hr);
@@ -516,9 +888,9 @@ static int vp_setup(AVFilterContext *ctx, NVVFXContext *s, int width, int height
     }
 
     hr = s->video_device->lpVtbl->CreateVideoProcessorOutputView(s->video_device,
-                                                                 (ID3D11Resource *)s->in_tex,
-                                                                 s->vp_enum, &out_desc,
-                                                                 &s->vp_out_view);
+                                                                 (ID3D11Resource *)target,
+                                                                 *vp_enum, &out_desc,
+                                                                 vp_out_view);
     if (FAILED(hr)) {
         av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to create the video processor "
                "output view (HRESULT 0x%lX).\n", hr);
@@ -526,10 +898,10 @@ static int vp_setup(AVFilterContext *ctx, NVVFXContext *s, int width, int height
     }
 
     s->video_context->lpVtbl->VideoProcessorSetStreamSourceRect(s->video_context,
-                                                                s->vp, 0, TRUE,
+                                                                *vp, 0, TRUE,
                                                                 &src_rect);
     s->video_context->lpVtbl->VideoProcessorSetStreamAutoProcessingMode(s->video_context,
-                                                                        s->vp, 0, FALSE);
+                                                                        *vp, 0, FALSE);
 
     {
         D3D11_VIDEO_PROCESSOR_COLOR_SPACE csp = {
@@ -538,7 +910,7 @@ static int vp_setup(AVFilterContext *ctx, NVVFXContext *s, int width, int height
             .Nominal_Range = D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255,
         };
         s->video_context->lpVtbl->VideoProcessorSetOutputColorSpace(s->video_context,
-                                                                    s->vp, &csp);
+                                                                    *vp, &csp);
     }
 
     return 0;
@@ -547,6 +919,18 @@ static int vp_setup(AVFilterContext *ctx, NVVFXContext *s, int width, int height
 static void vp_set_stream_colorspace(NVVFXContext *s, const AVFrame *frame)
 {
     int matrix_601;
+
+    if (s->in_sw_format == AV_PIX_FMT_X2BGR10) {
+        /* RGB source: full-range RGB is the only meaningful interpretation. */
+        D3D11_VIDEO_PROCESSOR_COLOR_SPACE csp = {
+            .Usage = 0,
+            .RGB_Range = 0,
+            .Nominal_Range = D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255,
+        };
+        s->video_context->lpVtbl->VideoProcessorSetStreamColorSpace(s->video_context,
+                                                                    s->vp, 0, &csp);
+        return;
+    }
 
     switch (frame->colorspace) {
     case AVCOL_SPC_BT470BG:
@@ -559,7 +943,9 @@ static void vp_set_stream_colorspace(NVVFXContext *s, const AVFrame *frame)
         matrix_601 = 0;
         break;
     default:
-        matrix_601 = frame->height <= 576;
+        /* 10-bit SDR sources are treated as BT.709 (the usual HD case); keep
+         * the existing SD heuristic for the 8-bit path. */
+        matrix_601 = nvvfx_10bit_mode(s) ? 0 : frame->height <= 576;
         break;
     }
 
@@ -580,20 +966,27 @@ static void vp_set_stream_colorspace(NVVFXContext *s, const AVFrame *frame)
 static int vfx_setup(AVFilterContext *ctx, NVVFXContext *s, int width, int height,
                      DXGI_FORMAT in_format, int pixfmt, int vp_needed)
 {
-    int quality_level;
+    int is_artifact = s->mode == MODE_ARTIFACT;
+    int is_hdr = nvvfx_hdr_mode(s);
+    int use_10bit = nvvfx_10bit_mode(s);
+    int bridge_out = use_10bit || is_hdr;
+    int quality_level = 0;
+    int in_pf = use_10bit ? NVCV_RGB10A2 : pixfmt;
+    int in_type = use_10bit ? NVCV_P32 : NVCV_U8;
+    int out_pf = (use_10bit || is_hdr) ? NVCV_RGB10A2 :
+                 is_artifact ? NVCV_BGRA : pixfmt;
+    int out_type = (use_10bit || is_hdr) ? NVCV_P32 : NVCV_U8;
     int out_width = s->mode == MODE_SUPERRES ? width * s->scale : width;
     int out_height = s->mode == MODE_SUPERRES ? height * s->scale : height;
-    int out_pixfmt = s->mode == MODE_ARTIFACT ? NVCV_BGRA : pixfmt;
     DXGI_FORMAT tex_format = vp_needed ? DXGI_FORMAT_B8G8R8A8_UNORM : in_format;
-    DXGI_FORMAT out_tex_format = s->mode == MODE_ARTIFACT ?
-                                 DXGI_FORMAT_B8G8R8A8_UNORM : tex_format;
+    DXGI_FORMAT out_tex_format = is_artifact ? DXGI_FORMAT_B8G8R8A8_UNORM : tex_format;
     char model_dir[NVVFX_MAX_PATH] = "";
     D3D11_QUERY_DESC query_desc = { .Query = D3D11_QUERY_EVENT };
     NvCV_Status st;
     HRESULT hr;
     int ret;
 
-    if (s->mode == MODE_ARTIFACT) {
+    if (is_artifact) {
         if (width > 1920 || height > 1080) {
             av_log(ctx, AV_LOG_ERROR, "nvvfx: ArtifactReduction supports at most "
                    "1920x1080 (got %dx%d).\n", width, height);
@@ -603,6 +996,8 @@ static int vfx_setup(AVFilterContext *ctx, NVVFXContext *s, int width, int heigh
         snprintf(model_dir, sizeof(model_dir), "%s\\models",
                  s->dep_dir && s->dep_dir[0] ? s->dep_dir :
                  "C:\\Program Files\\NVIDIA Corporation\\NVIDIA Video Effects");
+    } else if (is_hdr) {
+        quality_level = 0;
     } else if (s->mode == MODE_SUPERRES) {
         quality_level = 1 + s->quality;
     } else if (s->mode == MODE_DENOISE) {
@@ -620,27 +1015,82 @@ static int vfx_setup(AVFilterContext *ctx, NVVFXContext *s, int width, int heigh
     vfx_destroy(s);
     s->in_format = in_format;
 
-    if ((ret = create_texture(s, width, height, tex_format,
+    if (!use_10bit &&
+        (ret = create_texture(s, width, height, tex_format,
                               D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET,
-                              &s->in_tex)) < 0 ||
+                              &s->in_tex)) < 0) {
+        av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to create the input texture.\n");
+        goto fail;
+    }
+    if (!bridge_out &&
         (ret = create_texture(s, out_width, out_height, out_tex_format,
                               D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET,
                               &s->out_tex)) < 0) {
-        av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to create D3D11 textures.\n");
+        av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to create the output texture.\n");
+        goto fail;
+    }
+
+    /* True RGB10A2: the video processor writes an R10G10B10A2 texture, a
+     * pixel shader repacks it into RGBA16_UNORM (the only 10-bit-capable
+     * format NvCVImage can import from D3D11), then NvCVImage transfers it
+     * into a GPU RGB10A2 image. */
+    if (use_10bit &&
+        ((ret = create_texture(s, width, height, DXGI_FORMAT_R10G10B10A2_UNORM,
+                               D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET,
+                               &s->in_r10_tex)) < 0 ||
+         (ret = create_texture(s, width, height, DXGI_FORMAT_R16G16B16A16_UNORM,
+                               D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET,
+                               &s->in_u16_tex)) < 0)) {
+        av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to create the 10-bit input "
+               "bridge textures.\n");
+        goto fail;
+    }
+    if (bridge_out &&
+        ((ret = create_texture(s, out_width, out_height,
+                               DXGI_FORMAT_R16G16B16A16_UNORM,
+                               D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET,
+                               &s->out_u16_tex)) < 0 ||
+         (ret = create_texture(s, out_width, out_height,
+                               DXGI_FORMAT_R10G10B10A2_UNORM,
+                               D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET,
+                               &s->out_r10_tex)) < 0)) {
+        av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to create the 10-bit output "
+               "bridge textures.\n");
+        goto fail;
+    }
+    if (use_10bit && !is_hdr &&
+        (ret = create_texture(s, out_width, out_height, DXGI_FORMAT_P010,
+                              D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET,
+                              &s->out_p010_tex)) < 0) {
+        av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to create the P010 output "
+               "texture.\n");
         goto fail;
     }
 
     /* Normalize the input into a texture we own: decoder textures are padded
      * arrays, and hwupload textures carry no video-processor bind flags. */
-    if (vp_needed &&
-        ((ret = create_texture(s, width, height, in_format,
-                               D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_DECODER,
-                               &s->in_yuv_tex)) < 0 ||
-         (ret = create_texture(s, width, height, tex_format,
-                               D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET,
-                               &s->in_copy_tex)) < 0)) {
-        av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to create the staging textures.\n");
-        goto fail;
+    if (vp_needed) {
+        UINT yuv_bind = (in_format == DXGI_FORMAT_NV12 ||
+                         in_format == DXGI_FORMAT_P010) ?
+                        (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_DECODER) :
+                        (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET);
+
+        ret = create_texture(s, width, height, in_format, yuv_bind,
+                             &s->in_yuv_tex);
+        if (ret < 0) {
+            av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to create the staging textures.\n");
+            goto fail;
+        }
+        if (!use_10bit) {
+            ret = create_texture(s, width, height, tex_format,
+                                 D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET,
+                                 &s->in_copy_tex);
+            if (ret < 0) {
+                av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to create the staging "
+                       "textures.\n");
+                goto fail;
+            }
+        }
     }
 
     hr = s->device->lpVtbl->CreateQuery(s->device, &query_desc, &s->sync_query);
@@ -651,39 +1101,64 @@ static int vfx_setup(AVFilterContext *ctx, NVVFXContext *s, int width, int heigh
         goto fail;
     }
 
-    st = s->InitFromD3D11Texture(&s->in_d3d, s->in_tex);
-    if (st) {
-        av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to register the input texture (%s).\n",
-               vfx_err(s, st));
-        ret = AVERROR_EXTERNAL;
-        goto fail;
+    if (s->in_tex) {
+        st = s->InitFromD3D11Texture(&s->in_d3d, s->in_tex);
+        if (st) {
+            av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to register the input "
+                   "texture (%s).\n", vfx_err(s, st));
+            ret = AVERROR_EXTERNAL;
+            goto fail;
+        }
     }
-    st = s->InitFromD3D11Texture(&s->out_d3d, s->out_tex);
-    if (st) {
-        av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to register the output texture (%s).\n",
-               vfx_err(s, st));
-        ret = AVERROR_EXTERNAL;
-        goto fail;
+    if (s->out_tex) {
+        st = s->InitFromD3D11Texture(&s->out_d3d, s->out_tex);
+        if (st) {
+            av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to register the output "
+                   "texture (%s).\n", vfx_err(s, st));
+            ret = AVERROR_EXTERNAL;
+            goto fail;
+        }
     }
-    if (vp_needed) {
+    if (s->in_copy_tex) {
         st = s->InitFromD3D11Texture(&s->in_copy_d3d, s->in_copy_tex);
         if (st) {
-            av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to register the copy texture (%s).\n",
-                   vfx_err(s, st));
+            av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to register the copy "
+                   "texture (%s).\n", vfx_err(s, st));
+            ret = AVERROR_EXTERNAL;
+            goto fail;
+        }
+    }
+    if (s->in_u16_tex) {
+        st = s->InitFromD3D11Texture(&s->in_u16_d3d, s->in_u16_tex);
+        if (st) {
+            av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to register the U16 input "
+                   "texture (%s).\n", vfx_err(s, st));
+            ret = AVERROR_EXTERNAL;
+            goto fail;
+        }
+    }
+    if (s->out_u16_tex) {
+        st = s->InitFromD3D11Texture(&s->out_u16_d3d, s->out_u16_tex);
+        if (st) {
+            av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to register the U16 output "
+                   "texture (%s).\n", vfx_err(s, st));
             ret = AVERROR_EXTERNAL;
             goto fail;
         }
     }
 
-    st = s->Alloc(&s->in_gpu, width, height, pixfmt, NVCV_U8,
+    st = s->Alloc(&s->in_gpu, width, height, in_pf, in_type,
                   NVCV_CHUNKY, NVCV_GPU, 32);
     if (st) {
         av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to allocate the input image (%s).\n",
                vfx_err(s, st));
+        if (use_10bit || is_hdr)
+            av_log(ctx, AV_LOG_ERROR, "nvvfx: 10-bit and TrueHDR require the "
+                   "NVCVImage.dll from the NVIDIA VFX 0.2.0.0 wheel.\n");
         ret = AVERROR_EXTERNAL;
         goto fail;
     }
-    st = s->Alloc(&s->out_gpu, out_width, out_height, out_pixfmt, NVCV_U8,
+    st = s->Alloc(&s->out_gpu, out_width, out_height, out_pf, out_type,
                   NVCV_CHUNKY, NVCV_GPU, 32);
     if (st) {
         av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to allocate the output image (%s).\n",
@@ -692,7 +1167,39 @@ static int vfx_setup(AVFilterContext *ctx, NVVFXContext *s, int width, int heigh
         goto fail;
     }
 
-    if (s->mode == MODE_ARTIFACT) {
+    if (use_10bit) {
+        st = s->Alloc(&s->in_u16_gpu, width, height, NVCV_RGBA, NVCV_U16,
+                      NVCV_CHUNKY, NVCV_GPU, 32);
+        if (st) {
+            av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to allocate the U16 input "
+                   "image (%s).\n", vfx_err(s, st));
+            ret = AVERROR_EXTERNAL;
+            goto fail;
+        }
+    }
+    if (bridge_out) {
+        st = s->Alloc(&s->out_u16_gpu, out_width, out_height, NVCV_RGBA, NVCV_U16,
+                      NVCV_CHUNKY, NVCV_GPU, 32);
+        if (st) {
+            av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to allocate the U16 output "
+                   "image (%s).\n", vfx_err(s, st));
+            ret = AVERROR_EXTERNAL;
+            goto fail;
+        }
+    }
+    if (is_hdr) {
+        /* TrueHDR rejects BGRA input; keep an RGBA U8 conversion target. */
+        st = s->Alloc(&s->hdr_in_gpu, width, height, NVCV_RGBA, NVCV_U8,
+                      NVCV_CHUNKY, NVCV_GPU, 32);
+        if (st) {
+            av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to allocate the RGBA input "
+                   "image (%s).\n", vfx_err(s, st));
+            ret = AVERROR_EXTERNAL;
+            goto fail;
+        }
+    }
+
+    if (is_artifact) {
         st = s->Alloc(&s->in_f32, width, height, NVCV_BGR, NVCV_F32,
                       NVCV_PLANAR, NVCV_GPU, 32);
         if (st) {
@@ -712,11 +1219,48 @@ static int vfx_setup(AVFilterContext *ctx, NVVFXContext *s, int width, int heigh
     }
 
     if (vp_needed) {
-        if ((ret = vp_setup(ctx, s, width, height)) < 0)
+        ret = vp_create(ctx, s, width, height,
+                        use_10bit ? s->in_r10_tex : s->in_tex,
+                        &s->vp_enum, &s->vp, &s->vp_out_view);
+        if (ret < 0)
             goto fail;
     }
+    if (use_10bit && !is_hdr) {
+        D3D11_VIDEO_PROCESSOR_COLOR_SPACE stream_csp = {
+            .Usage = 0,
+            .RGB_Range = 0,
+            .Nominal_Range = D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255,
+        };
+        D3D11_VIDEO_PROCESSOR_COLOR_SPACE out_csp = {
+            .Usage = 0,
+            .RGB_Range = 0,
+            .YCbCr_Matrix = 1, /* BT.709 */
+            .Nominal_Range = D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235,
+        };
 
-    if (s->mode == MODE_ARTIFACT) {
+        ret = vp_create(ctx, s, out_width, out_height, s->out_p010_tex,
+                        &s->vp_out_enum, &s->vp_out, &s->vp_out_p010_view);
+        if (ret < 0)
+            goto fail;
+        s->video_context->lpVtbl->VideoProcessorSetStreamColorSpace(s->video_context,
+                                                                    s->vp_out, 0,
+                                                                    &stream_csp);
+        s->video_context->lpVtbl->VideoProcessorSetOutputColorSpace(s->video_context,
+                                                                    s->vp_out,
+                                                                    &out_csp);
+    }
+
+    if (bridge_out) {
+        if ((ret = bridge_ensure(ctx, s)) < 0)
+            goto fail;
+        if ((ret = bridge_views(s)) < 0) {
+            av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to create the bridge views.\n");
+            ret = AVERROR_EXTERNAL;
+            goto fail;
+        }
+    }
+
+    if (is_artifact) {
         st = s->CreateEffect("ArtifactReduction", &s->effect);
         if (st) {
             av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to create the "
@@ -729,6 +1273,30 @@ static int vfx_setup(AVFilterContext *ctx, NVVFXContext *s, int width, int heigh
         if (st) {
             av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to set Mode=%d (%s).\n",
                    quality_level, vfx_err(s, st));
+            ret = AVERROR_EXTERNAL;
+            goto fail;
+        }
+    } else if (is_hdr) {
+        st = s->CreateEffect("TrueHDR", &s->effect);
+        if (st) {
+            av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to create the TrueHDR "
+                   "effect (%s).\n", vfx_err(s, st));
+            ret = AVERROR_EXTERNAL;
+            goto fail;
+        }
+
+        st = s->SetU32(s->effect, NVVFX_CONTRAST, s->contrast);
+        if (!st)
+            st = s->SetU32(s->effect, NVVFX_SATURATION, s->saturation);
+        if (!st)
+            st = s->SetU32(s->effect, NVVFX_MIDDLE_GRAY, s->middle_gray);
+        if (!st)
+            st = s->SetU32(s->effect, NVVFX_LUMINANCE, s->luminance);
+        if (!st)
+            st = s->SetU32(s->effect, NVVFX_DEBANDING_OFF, s->debanding_off);
+        if (st) {
+            av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to set the TrueHDR "
+                   "parameters (%s).\n", vfx_err(s, st));
             ret = AVERROR_EXTERNAL;
             goto fail;
         }
@@ -747,6 +1315,34 @@ static int vfx_setup(AVFilterContext *ctx, NVVFXContext *s, int width, int heigh
                    quality_level, vfx_err(s, st));
             ret = AVERROR_EXTERNAL;
             goto fail;
+        }
+
+        st = s->SetF32(s->effect, NVVFX_STRENGTH, s->strength);
+        if (st) {
+            /* The 1.3 VideoSuperRes feature DLL as shipped in the older split
+             * runtime returns -2 (unimplemented) for Strength; its default is
+             * already 1.0, so that combination keeps working. */
+            if (s->strength == 1.0f) {
+                av_log(ctx, AV_LOG_VERBOSE, "nvvfx: runtime rejected the default "
+                       "Strength selector (%s); using its default.\n",
+                       vfx_err(s, st));
+            } else {
+                av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to set Strength=%.3f (%s).\n",
+                       s->strength, vfx_err(s, st));
+                ret = AVERROR_EXTERNAL;
+                goto fail;
+            }
+        }
+
+        if (use_10bit) {
+            /* Must be set before SetImage/Load and match both images. */
+            st = s->SetU32(s->effect, NVVFX_ENCODING, 1);
+            if (st) {
+                av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to set "
+                       "ImageEncodingMode=1 (%s).\n", vfx_err(s, st));
+                ret = AVERROR_EXTERNAL;
+                goto fail;
+            }
         }
     }
 
@@ -768,7 +1364,7 @@ static int vfx_setup(AVFilterContext *ctx, NVVFXContext *s, int width, int heigh
         goto fail;
     }
 
-    if (s->mode == MODE_ARTIFACT) {
+    if (is_artifact) {
         st = s->SetString(s->effect, NVVFX_MODEL_DIR, model_dir);
         if (st) {
             av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to set ModelDir=%s (%s).\n",
@@ -791,7 +1387,10 @@ static int vfx_setup(AVFilterContext *ctx, NVVFXContext *s, int width, int heigh
             goto fail;
         }
     } else {
-        st = s->SetImage(s->effect, NVVFX_INPUT_IMAGE, &s->in_gpu);
+        NvCVImage *src = is_hdr && pixfmt != NVCV_RGBA ?
+                         &s->hdr_in_gpu : &s->in_gpu;
+
+        st = s->SetImage(s->effect, NVVFX_INPUT_IMAGE, src);
         if (st) {
             av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to set the input image (%s).\n",
                    vfx_err(s, st));
@@ -810,8 +1409,8 @@ static int vfx_setup(AVFilterContext *ctx, NVVFXContext *s, int width, int heigh
     st = s->Load(s->effect);
     if (st) {
         av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to load the %s model (%s).\n",
-               s->mode == MODE_ARTIFACT ? "ArtifactReduction" : "VideoSuperRes",
-               vfx_err(s, st));
+               is_artifact ? "ArtifactReduction" :
+               is_hdr ? "TrueHDR" : "VideoSuperRes", vfx_err(s, st));
         ret = AVERROR_EXTERNAL;
         goto fail;
     }
@@ -827,9 +1426,11 @@ static int vfx_setup(AVFilterContext *ctx, NVVFXContext *s, int width, int heigh
     s->ready = 1;
 
     av_log(ctx, AV_LOG_VERBOSE, "nvvfx: %s ready (%dx%d -> %dx%d, quality=%d, "
-           "mode=%d)\n", s->mode == MODE_ARTIFACT ? "ArtifactReduction" :
-           "VideoSuperRes", width, height, out_width, out_height,
-           quality_level, s->mode);
+           "mode=%d, %s)\n", is_artifact ? "ArtifactReduction" :
+           is_hdr ? "TrueHDR" : "VideoSuperRes", width, height,
+           out_width, out_height, quality_level, s->mode,
+           use_10bit ? "10-bit RGB10A2" : is_hdr ? "RGBA8 in, RGB10A2 out" :
+           "8-bit RGBA/BGRA");
     return 0;
 
 fail:
@@ -859,10 +1460,14 @@ static int d3d11_sync(AVFilterContext *ctx, NVVFXContext *s)
     return 0;
 }
 
-static int vp_convert(AVFilterContext *ctx, NVVFXContext *s)
+static int vp_blt(AVFilterContext *ctx, NVVFXContext *s,
+                  ID3D11VideoProcessorEnumerator *vp_enum,
+                  ID3D11VideoProcessor *vp,
+                  ID3D11VideoProcessorOutputView *out_view,
+                  ID3D11Texture2D *src_tex, DXGI_FORMAT fourcc)
 {
     D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC view_desc = {
-        .FourCC = s->in_format,
+        .FourCC = fourcc,
         .ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D,
         .Texture2D.ArraySlice = 0,
     };
@@ -874,8 +1479,8 @@ static int vp_convert(AVFilterContext *ctx, NVVFXContext *s)
     HRESULT hr;
 
     hr = s->video_device->lpVtbl->CreateVideoProcessorInputView(s->video_device,
-                                                                (ID3D11Resource *)s->in_yuv_tex,
-                                                                s->vp_enum, &view_desc,
+                                                                (ID3D11Resource *)src_tex,
+                                                                vp_enum, &view_desc,
                                                                 &view);
     if (FAILED(hr)) {
         av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to create the input view "
@@ -885,8 +1490,8 @@ static int vp_convert(AVFilterContext *ctx, NVVFXContext *s)
 
     stream.pInputSurface = view;
 
-    hr = s->video_context->lpVtbl->VideoProcessorBlt(s->video_context, s->vp,
-                                                     s->vp_out_view, 0, 1, &stream);
+    hr = s->video_context->lpVtbl->VideoProcessorBlt(s->video_context, vp,
+                                                     out_view, 0, 1, &stream);
     view->lpVtbl->Release(view);
 
     if (FAILED(hr)) {
@@ -901,54 +1506,108 @@ static int vfx_process(AVFilterContext *ctx, NVVFXContext *s, const AVFrame *fra
                        ID3D11Texture2D *in_tex, UINT in_slice,
                        ID3D11Texture2D *out_tex, UINT out_slice)
 {
+    int is_hdr = nvvfx_hdr_mode(s);
+    int use_10bit = nvvfx_10bit_mode(s);
+    int bridge_out = use_10bit || is_hdr;
     NvCV_Status st;
     int ret;
 
     if (!s->ready)
         return AVERROR(EINVAL);
 
-    if (s->vp_needed) {
-        vp_set_stream_colorspace(s, frame);
-        s->device_ctx->lpVtbl->CopySubresourceRegion(s->device_ctx,
-                                                     (ID3D11Resource *)s->in_yuv_tex, 0,
-                                                     0, 0, 0,
-                                                     (ID3D11Resource *)in_tex,
-                                                     in_slice, NULL);
-        if ((ret = vp_convert(ctx, s)) < 0)
+    if (use_10bit) {
+        if (s->vp_needed) {
+            vp_set_stream_colorspace(s, frame);
+            s->device_ctx->lpVtbl->CopySubresourceRegion(s->device_ctx,
+                                                         (ID3D11Resource *)s->in_yuv_tex, 0,
+                                                         0, 0, 0,
+                                                         (ID3D11Resource *)in_tex,
+                                                         in_slice, NULL);
+            if ((ret = vp_blt(ctx, s, s->vp_enum, s->vp, s->vp_out_view,
+                              s->in_yuv_tex, s->in_format)) < 0)
+                return ret;
+        } else {
+            /* X2BGR10 already is an R10G10B10A2 texture. */
+            s->device_ctx->lpVtbl->CopySubresourceRegion(s->device_ctx,
+                                                         (ID3D11Resource *)s->in_r10_tex, 0,
+                                                         0, 0, 0,
+                                                         (ID3D11Resource *)in_tex,
+                                                         in_slice, NULL);
+        }
+
+        if ((ret = d3d11_sync(ctx, s)) < 0)
             return ret;
-        /* CUDA can see stale data when it maps a texture the video processor
-         * just wrote, so map a copy made by the D3D11 context instead. */
-        s->device_ctx->lpVtbl->CopySubresourceRegion(s->device_ctx,
-                                                     (ID3D11Resource *)s->in_copy_tex, 0,
-                                                     0, 0, 0,
-                                                     (ID3D11Resource *)s->in_tex, 0, NULL);
-    } else {
-        s->device_ctx->lpVtbl->CopySubresourceRegion(s->device_ctx,
-                                                     (ID3D11Resource *)s->in_tex, 0,
-                                                     0, 0, 0,
-                                                     (ID3D11Resource *)in_tex,
-                                                     in_slice, NULL);
-    }
 
-    /* The copy/Blt is asynchronous; CUDA must not map the texture before the
-     * GPU has finished writing it. */
-    if ((ret = d3d11_sync(ctx, s)) < 0)
-        return ret;
+        /* R10G10B10A2 -> RGBA16_UNORM, the only 10-bit format NvCVImage can
+         * import from a D3D11 texture. */
+        bridge_draw(s, s->in_r10_srv, s->in_u16_rtv, s->width, s->height);
+        if ((ret = d3d11_sync(ctx, s)) < 0)
+            return ret;
 
-    {
-        NvCVImage *in_d3d = s->vp_needed ? &s->in_copy_d3d : &s->in_d3d;
-        st = s->MapResource(in_d3d, s->stream);
+        st = s->MapResource(&s->in_u16_d3d, s->stream);
         if (st == 0) {
-            NvCV_Status transfer_st = s->Transfer(in_d3d, &s->in_gpu, 1.0f,
-                                                  s->stream, NULL);
-            NvCV_Status unmap_st = s->UnmapResource(in_d3d, s->stream);
+            NvCV_Status transfer_st = s->Transfer(&s->in_u16_d3d, &s->in_u16_gpu,
+                                                  1.0f, s->stream, NULL);
+            NvCV_Status unmap_st = s->UnmapResource(&s->in_u16_d3d, s->stream);
             st = transfer_st ? transfer_st : unmap_st;
         }
-    }
-    if (st) {
-        av_log(ctx, AV_LOG_ERROR, "nvvfx: input transfer failed (%s).\n",
-               vfx_err(s, st));
-        return AVERROR_EXTERNAL;
+        if (st) {
+            av_log(ctx, AV_LOG_ERROR, "nvvfx: 10-bit input transfer failed (%s).\n",
+                   vfx_err(s, st));
+            return AVERROR_EXTERNAL;
+        }
+
+        st = s->Transfer(&s->in_u16_gpu, &s->in_gpu, 1.0f, s->stream, NULL);
+        if (st) {
+            av_log(ctx, AV_LOG_ERROR, "nvvfx: 10-bit input repack failed (%s).\n",
+                   vfx_err(s, st));
+            return AVERROR_EXTERNAL;
+        }
+    } else {
+        if (s->vp_needed) {
+            vp_set_stream_colorspace(s, frame);
+            s->device_ctx->lpVtbl->CopySubresourceRegion(s->device_ctx,
+                                                         (ID3D11Resource *)s->in_yuv_tex, 0,
+                                                         0, 0, 0,
+                                                         (ID3D11Resource *)in_tex,
+                                                         in_slice, NULL);
+            if ((ret = vp_blt(ctx, s, s->vp_enum, s->vp, s->vp_out_view,
+                              s->in_yuv_tex, s->in_format)) < 0)
+                return ret;
+            /* CUDA can see stale data when it maps a texture the video processor
+             * just wrote, so map a copy made by the D3D11 context instead. */
+            s->device_ctx->lpVtbl->CopySubresourceRegion(s->device_ctx,
+                                                         (ID3D11Resource *)s->in_copy_tex, 0,
+                                                         0, 0, 0,
+                                                         (ID3D11Resource *)s->in_tex, 0, NULL);
+        } else {
+            s->device_ctx->lpVtbl->CopySubresourceRegion(s->device_ctx,
+                                                         (ID3D11Resource *)s->in_tex, 0,
+                                                         0, 0, 0,
+                                                         (ID3D11Resource *)in_tex,
+                                                         in_slice, NULL);
+        }
+
+        /* The copy/Blt is asynchronous; CUDA must not map the texture before the
+         * GPU has finished writing it. */
+        if ((ret = d3d11_sync(ctx, s)) < 0)
+            return ret;
+
+        {
+            NvCVImage *in_d3d = s->vp_needed ? &s->in_copy_d3d : &s->in_d3d;
+            st = s->MapResource(in_d3d, s->stream);
+            if (st == 0) {
+                NvCV_Status transfer_st = s->Transfer(in_d3d, &s->in_gpu, 1.0f,
+                                                      s->stream, NULL);
+                NvCV_Status unmap_st = s->UnmapResource(in_d3d, s->stream);
+                st = transfer_st ? transfer_st : unmap_st;
+            }
+        }
+        if (st) {
+            av_log(ctx, AV_LOG_ERROR, "nvvfx: input transfer failed (%s).\n",
+                   vfx_err(s, st));
+            return AVERROR_EXTERNAL;
+        }
     }
 
     if (s->mode == MODE_ARTIFACT) {
@@ -957,6 +1616,16 @@ static int vfx_process(AVFilterContext *ctx, NVVFXContext *s, const AVFrame *fra
                          s->stream, NULL);
         if (st) {
             av_log(ctx, AV_LOG_ERROR, "nvvfx: input format conversion failed (%s).\n",
+                   vfx_err(s, st));
+            return AVERROR_EXTERNAL;
+        }
+    }
+
+    if (is_hdr && s->pixfmt != NVCV_RGBA) {
+        /* TrueHDR explicitly rejects BGRA input. */
+        st = s->Transfer(&s->in_gpu, &s->hdr_in_gpu, 1.0f, s->stream, NULL);
+        if (st) {
+            av_log(ctx, AV_LOG_ERROR, "nvvfx: BGRA to RGBA conversion failed (%s).\n",
                    vfx_err(s, st));
             return AVERROR_EXTERNAL;
         }
@@ -978,30 +1647,86 @@ static int vfx_process(AVFilterContext *ctx, NVVFXContext *s, const AVFrame *fra
         }
     }
 
-    st = s->MapResource(&s->out_d3d, s->stream);
-    if (st == 0) {
-        NvCV_Status transfer_st = s->Transfer(&s->out_gpu, &s->out_d3d, 1.0f,
-                                              s->stream, NULL);
-        NvCV_Status unmap_st = s->UnmapResource(&s->out_d3d, s->stream);
-        st = transfer_st ? transfer_st : unmap_st;
-    }
-    if (st) {
-        av_log(ctx, AV_LOG_ERROR, "nvvfx: output transfer failed (%s).\n",
-               vfx_err(s, st));
-        return AVERROR_EXTERNAL;
+    if (bridge_out) {
+        /* RGB10A2 -> RGBA16_UNORM -> D3D11 shader -> R10G10B10A2. */
+        st = s->Transfer(&s->out_gpu, &s->out_u16_gpu, 1.0f, s->stream, NULL);
+        if (st) {
+            av_log(ctx, AV_LOG_ERROR, "nvvfx: 10-bit output repack failed (%s).\n",
+                   vfx_err(s, st));
+            return AVERROR_EXTERNAL;
+        }
+
+        st = s->MapResource(&s->out_u16_d3d, s->stream);
+        if (st == 0) {
+            NvCV_Status transfer_st = s->Transfer(&s->out_u16_gpu, &s->out_u16_d3d,
+                                                  1.0f, s->stream, NULL);
+            NvCV_Status unmap_st = s->UnmapResource(&s->out_u16_d3d, s->stream);
+            st = transfer_st ? transfer_st : unmap_st;
+        }
+        if (st) {
+            av_log(ctx, AV_LOG_ERROR, "nvvfx: 10-bit output transfer failed (%s).\n",
+                   vfx_err(s, st));
+            return AVERROR_EXTERNAL;
+        }
+
+        if (s->CudaStreamSynchronize)
+            s->CudaStreamSynchronize(s->stream);
+
+        bridge_draw(s, s->out_u16_srv, s->out_r10_rtv, s->out_width, s->out_height);
+        if ((ret = d3d11_sync(ctx, s)) < 0)
+            return ret;
+
+        if (is_hdr) {
+            /* TrueHDR output is already packed PQ/BT.2020 RGB10A2; copy it
+             * straight into the X2BGR10 output frame (no VP color conversion). */
+            s->device_ctx->lpVtbl->CopySubresourceRegion(s->device_ctx,
+                                                         (ID3D11Resource *)out_tex, out_slice,
+                                                         0, 0, 0,
+                                                         (ID3D11Resource *)s->out_r10_tex,
+                                                         0, NULL);
+        } else {
+            /* SDR RGB10A2 -> P010, BT.709 limited. */
+            if ((ret = vp_blt(ctx, s, s->vp_out_enum, s->vp_out,
+                              s->vp_out_p010_view, s->out_r10_tex,
+                              DXGI_FORMAT_UNKNOWN)) < 0)
+                return ret;
+            if ((ret = d3d11_sync(ctx, s)) < 0)
+                return ret;
+            s->device_ctx->lpVtbl->CopySubresourceRegion(s->device_ctx,
+                                                         (ID3D11Resource *)out_tex, out_slice,
+                                                         0, 0, 0,
+                                                         (ID3D11Resource *)s->out_p010_tex,
+                                                         0, NULL);
+        }
+    } else {
+        st = s->MapResource(&s->out_d3d, s->stream);
+        if (st == 0) {
+            NvCV_Status transfer_st = s->Transfer(&s->out_gpu, &s->out_d3d, 1.0f,
+                                                  s->stream, NULL);
+            NvCV_Status unmap_st = s->UnmapResource(&s->out_d3d, s->stream);
+            st = transfer_st ? transfer_st : unmap_st;
+        }
+        if (st) {
+            av_log(ctx, AV_LOG_ERROR, "nvvfx: output transfer failed (%s).\n",
+                   vfx_err(s, st));
+            return AVERROR_EXTERNAL;
+        }
+
+        if (s->CudaStreamSynchronize)
+            s->CudaStreamSynchronize(s->stream);
+
+        s->device_ctx->lpVtbl->CopySubresourceRegion(s->device_ctx,
+                                                     (ID3D11Resource *)out_tex, out_slice,
+                                                     0, 0, 0,
+                                                     (ID3D11Resource *)s->out_tex,
+                                                     0, NULL);
     }
 
-    if (s->CudaStreamSynchronize)
-        s->CudaStreamSynchronize(s->stream);
-
-    s->device_ctx->lpVtbl->CopySubresourceRegion(s->device_ctx,
-                                                 (ID3D11Resource *)out_tex, out_slice,
-                                                 0, 0, 0,
-                                                 (ID3D11Resource *)s->out_tex,
-                                                 0, NULL);
     s->device_ctx->lpVtbl->Flush(s->device_ctx);
     return 0;
 }
+
+static int nvvfx_set_output_hdr10_metadata(NVVFXContext *s, AVFilterLink *outlink);
 
 static int nvvfx_config_props(AVFilterLink *outlink)
 {
@@ -1039,22 +1764,52 @@ static int nvvfx_config_props(AVFilterLink *outlink)
     in_frames = (AVHWFramesContext *)inl->hw_frames_ctx->data;
     s->in_sw_format = in_frames->sw_format;
 
-    switch (s->in_sw_format) {
-    case AV_PIX_FMT_NV12:
-    case AV_PIX_FMT_P010:
-        s->out_sw_format = AV_PIX_FMT_BGRA;
-        vp_needed = 1;
-        break;
-    case AV_PIX_FMT_BGRA:
-    case AV_PIX_FMT_RGBA:
-        s->out_sw_format = s->in_sw_format;
-        vp_needed = 0;
-        break;
-    default:
-        av_log(ctx, AV_LOG_ERROR, "nvvfx: unsupported input format %s, expected "
-               "NV12, P010, BGRA or RGBA.\n",
-               av_get_pix_fmt_name(s->in_sw_format));
+    if (s->mode == MODE_ARTIFACT && s->bit_depth != 8) {
+        av_log(ctx, AV_LOG_ERROR, "nvvfx: bit_depth is only supported for "
+               "superres/denoise/deblur and hdr.\n");
         return AVERROR(EINVAL);
+    }
+
+    if (s->mode == MODE_HDR) {
+        switch (s->in_sw_format) {
+        case AV_PIX_FMT_NV12:
+        case AV_PIX_FMT_P010:
+        case AV_PIX_FMT_BGRA:
+        case AV_PIX_FMT_RGBA:
+        case AV_PIX_FMT_X2BGR10:
+            s->out_sw_format = AV_PIX_FMT_X2BGR10;
+            break;
+        default:
+            av_log(ctx, AV_LOG_ERROR, "nvvfx: TrueHDR requires NV12, P010, BGRA, "
+                   "RGBA or X2BGR10 input, got %s.\n",
+                   av_get_pix_fmt_name(s->in_sw_format));
+            return AVERROR(EINVAL);
+        }
+    } else if (nvvfx_10bit_mode(s)) {
+        if (s->in_sw_format != AV_PIX_FMT_P010 &&
+            s->in_sw_format != AV_PIX_FMT_X2BGR10) {
+            av_log(ctx, AV_LOG_ERROR, "nvvfx: bit_depth=10 requires P010 or "
+                   "X2BGR10 input, got %s.\n",
+                   av_get_pix_fmt_name(s->in_sw_format));
+            return AVERROR(EINVAL);
+        }
+        s->out_sw_format = AV_PIX_FMT_P010;
+    } else {
+        switch (s->in_sw_format) {
+        case AV_PIX_FMT_NV12:
+        case AV_PIX_FMT_P010:
+            s->out_sw_format = AV_PIX_FMT_BGRA;
+            break;
+        case AV_PIX_FMT_BGRA:
+        case AV_PIX_FMT_RGBA:
+            s->out_sw_format = s->in_sw_format;
+            break;
+        default:
+            av_log(ctx, AV_LOG_ERROR, "nvvfx: unsupported input format %s, expected "
+                   "NV12, P010, BGRA or RGBA (P010/X2BGR10 with bit_depth=10).\n",
+                   av_get_pix_fmt_name(s->in_sw_format));
+            return AVERROR(EINVAL);
+        }
     }
 
     if (s->mode == MODE_ARTIFACT) {
@@ -1065,6 +1820,8 @@ static int nvvfx_config_props(AVFilterLink *outlink)
         }
         s->out_sw_format = AV_PIX_FMT_BGRA;
     }
+
+    vp_needed = nvvfx_input_needs_vp(s);
 
     av_buffer_unref(&s->hw_device_ctx);
     s->hw_device_ctx = av_buffer_ref(in_frames->device_ref);
@@ -1080,7 +1837,9 @@ static int nvvfx_config_props(AVFilterLink *outlink)
         return AVERROR(EINVAL);
     }
 
-    if (vp_needed) {
+    /* 10-bit SDR always needs the video processor for the RGB10A2 -> P010
+     * output stage, even when the input is already an X2BGR10 texture. */
+    if (vp_needed || nvvfx_10bit_mode(s)) {
         hr = s->device->lpVtbl->QueryInterface(s->device, &IID_ID3D11VideoDevice,
                                                (void **)&s->video_device);
         if (FAILED(hr)) {
@@ -1102,6 +1861,15 @@ static int nvvfx_config_props(AVFilterLink *outlink)
     outlink->w = out_width;
     outlink->h = out_height;
 
+    if (s->mode == MODE_HDR) {
+        ret = nvvfx_set_output_hdr10_metadata(s, outlink);
+        if (ret < 0) {
+            av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to set the HDR10 output "
+                   "metadata.\n");
+            return ret;
+        }
+    }
+
     s->hw_frames_ctx_out = av_hwframe_ctx_alloc(s->hw_device_ctx);
     if (!s->hw_frames_ctx_out)
         return AVERROR(ENOMEM);
@@ -1111,9 +1879,16 @@ static int nvvfx_config_props(AVFilterLink *outlink)
     out_frames->sw_format = s->out_sw_format;
     out_frames->width = out_width;
     out_frames->height = out_height;
-    out_frames->initial_pool_size = 10;
-    if (ctx->extra_hw_frames > 0)
-        out_frames->initial_pool_size += ctx->extra_hw_frames;
+    /* D3D11 rejects static array textures with RENDER_TARGET for NV12/P010
+     * (and the 10-bit RGB formats), so let the pool allocate on demand. */
+    if (s->out_sw_format == AV_PIX_FMT_P010 ||
+        s->out_sw_format == AV_PIX_FMT_X2BGR10) {
+        out_frames->initial_pool_size = 0;
+    } else {
+        out_frames->initial_pool_size = 10;
+        if (ctx->extra_hw_frames > 0)
+            out_frames->initial_pool_size += ctx->extra_hw_frames;
+    }
 
     out_frames_hwctx = out_frames->hwctx;
     out_frames_hwctx->BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
@@ -1136,6 +1911,87 @@ static int nvvfx_config_props(AVFilterLink *outlink)
     av_log(ctx, AV_LOG_VERBOSE, "nvvfx: configured %dx%d %s -> %dx%d %s (mode=%d)\n",
            inlink->w, inlink->h, av_get_pix_fmt_name(s->in_sw_format),
            out_width, out_height, av_get_pix_fmt_name(s->out_sw_format), s->mode);
+    return 0;
+}
+
+static void nvvfx_fill_hdr10_metadata(NVVFXContext *s,
+                                      AVMasteringDisplayMetadata *mdm,
+                                      AVContentLightMetadata *cll)
+{
+    memset(mdm, 0, sizeof(*mdm));
+    mdm->display_primaries[0][0] = (AVRational){ 35400, 50000 }; /* R x */
+    mdm->display_primaries[0][1] = (AVRational){ 14600, 50000 }; /* R y */
+    mdm->display_primaries[1][0] = (AVRational){  8500, 50000 }; /* G x */
+    mdm->display_primaries[1][1] = (AVRational){ 39850, 50000 }; /* G y */
+    mdm->display_primaries[2][0] = (AVRational){  6550, 50000 }; /* B x */
+    mdm->display_primaries[2][1] = (AVRational){  2300, 50000 }; /* B y */
+    mdm->white_point[0] = (AVRational){ 15635, 50000 };          /* D65 x */
+    mdm->white_point[1] = (AVRational){ 16450, 50000 };          /* D65 y */
+    mdm->has_primaries = 1;
+
+    mdm->max_luminance = (AVRational){ s->luminance * 10000, 10000 };
+    mdm->min_luminance = (AVRational){ 1, 10000 };               /* 0.0001 nits */
+    mdm->has_luminance = 1;
+
+    memset(cll, 0, sizeof(*cll));
+    cll->MaxCLL  = 0; /* unknown */
+    cll->MaxFALL = 0; /* unknown */
+}
+
+/* Global (link) copy: lets the FFmpeg CLI initialise the encoder with HDR10
+ * static metadata, which is what makes NVENC emit the ST 2086/CLL SEI. */
+static int nvvfx_set_output_hdr10_metadata(NVVFXContext *s, AVFilterLink *outlink)
+{
+    AVFrameSideData *sd;
+    AVMasteringDisplayMetadata *mdm;
+    AVContentLightMetadata *cll;
+
+    av_frame_side_data_remove_by_props(&outlink->side_data, &outlink->nb_side_data,
+                                       AV_SIDE_DATA_PROP_COLOR_DEPENDENT);
+
+    sd = av_frame_side_data_new(&outlink->side_data, &outlink->nb_side_data,
+                                AV_FRAME_DATA_MASTERING_DISPLAY_METADATA,
+                                sizeof(*mdm), 0);
+    if (!sd)
+        return AVERROR(ENOMEM);
+    mdm = (AVMasteringDisplayMetadata *)sd->data;
+
+    sd = av_frame_side_data_new(&outlink->side_data, &outlink->nb_side_data,
+                                AV_FRAME_DATA_CONTENT_LIGHT_LEVEL,
+                                sizeof(*cll), 0);
+    if (!sd)
+        return AVERROR(ENOMEM);
+    cll = (AVContentLightMetadata *)sd->data;
+
+    nvvfx_fill_hdr10_metadata(s, mdm, cll);
+    return 0;
+}
+
+static int nvvfx_attach_hdr10_metadata(NVVFXContext *s, AVFrame *frame)
+{
+    AVMasteringDisplayMetadata *mdm;
+    AVContentLightMetadata *cll;
+
+    frame->colorspace      = AVCOL_SPC_RGB;
+    frame->color_range     = AVCOL_RANGE_JPEG;
+    frame->color_trc       = AVCOL_TRC_SMPTE2084;
+    frame->color_primaries = AVCOL_PRI_BT2020;
+    frame->chroma_location = AVCHROMA_LOC_UNSPECIFIED;
+
+    /* The SDR input may have carried colour-dependent side data; it is not
+     * valid for the converted PQ/BT.2020 frame. */
+    av_frame_side_data_remove_by_props(&frame->side_data, &frame->nb_side_data,
+                                       AV_SIDE_DATA_PROP_COLOR_DEPENDENT);
+
+    mdm = av_mastering_display_metadata_create_side_data(frame);
+    if (!mdm)
+        return AVERROR(ENOMEM);
+
+    cll = av_content_light_metadata_create_side_data(frame);
+    if (!cll)
+        return AVERROR(ENOMEM);
+
+    nvvfx_fill_hdr10_metadata(s, mdm, cll);
     return 0;
 }
 
@@ -1182,8 +2038,7 @@ static int nvvfx_filter_frame(AVFilterLink *inlink, AVFrame *in)
     }
 
     pixfmt = s->in_sw_format == AV_PIX_FMT_RGBA ? NVCV_RGBA : NVCV_BGRA;
-    vp_needed = s->in_sw_format == AV_PIX_FMT_NV12 ||
-                s->in_sw_format == AV_PIX_FMT_P010;
+    vp_needed = nvvfx_input_needs_vp(s);
 
     ret = vfx_setup(ctx, s, width, height, desc.Format, pixfmt, vp_needed);
     if (ret < 0) {
@@ -1216,10 +2071,28 @@ static int nvvfx_filter_frame(AVFilterLink *inlink, AVFrame *in)
         goto fail;
     }
 
-    /* The video processor writes full-range RGB. */
-    if (s->vp_needed && (s->out_sw_format == AV_PIX_FMT_BGRA ||
-                         s->out_sw_format == AV_PIX_FMT_RGBA))
+    if (nvvfx_hdr_mode(s)) {
+        ret = nvvfx_attach_hdr10_metadata(s, out);
+        if (ret < 0) {
+            av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to attach HDR10 metadata.\n");
+            goto fail;
+        }
+    } else if (nvvfx_10bit_mode(s)) {
+        /* SDR 10-bit: the video processor writes BT.709 limited-range P010. */
+        out->color_range = AVCOL_RANGE_MPEG;
+        if (out->colorspace == AVCOL_SPC_UNSPECIFIED ||
+            out->colorspace == AVCOL_SPC_RGB)
+            out->colorspace = AVCOL_SPC_BT709;
+        if (out->color_primaries == AVCOL_PRI_UNSPECIFIED)
+            out->color_primaries = AVCOL_PRI_BT709;
+        if (out->color_trc == AVCOL_TRC_UNSPECIFIED)
+            out->color_trc = AVCOL_TRC_BT709;
+        out->chroma_location = AVCHROMA_LOC_LEFT;
+    } else if (s->vp_needed && (s->out_sw_format == AV_PIX_FMT_BGRA ||
+                                s->out_sw_format == AV_PIX_FMT_RGBA)) {
+        /* The video processor writes full-range RGB. */
         out->color_range = AVCOL_RANGE_JPEG;
+    }
 
     out->width = s->out_width;
     out->height = s->out_height;
@@ -1285,6 +2158,8 @@ static const AVOption nvvfx_options[] = {
       { .i64 = MODE_DEBLUR }, 0, 0, FLAGS, "mode" },
     { "artifact", "compression artifact reduction", 0, AV_OPT_TYPE_CONST,
       { .i64 = MODE_ARTIFACT }, 0, 0, FLAGS, "mode" },
+    { "hdr", "SDR to HDR10 conversion (TrueHDR)", 0, AV_OPT_TYPE_CONST,
+      { .i64 = MODE_HDR }, 0, 0, FLAGS, "mode" },
     { "quality", "quality level", OFFSET(quality), AV_OPT_TYPE_INT,
       { .i64 = QUALITY_HIGH }, 0, QUALITY_NB - 1, FLAGS, "quality" },
     { "low", "low quality", 0, AV_OPT_TYPE_CONST,
@@ -1301,6 +2176,24 @@ static const AVOption nvvfx_options[] = {
       { .i64 = QUALITY_MEDIUM }, 0, 0, FLAGS, "quality" },
     { "scale", "super resolution scale factor", OFFSET(scale), AV_OPT_TYPE_INT,
       { .i64 = 2 }, 2, 4, FLAGS },
+    { "strength", "super resolution strength", OFFSET(strength), AV_OPT_TYPE_FLOAT,
+      { .dbl = 1.0 }, 0.0, 1.0, FLAGS },
+    { "bit_depth", "input/output bit depth for VideoSuperRes", OFFSET(bit_depth),
+      AV_OPT_TYPE_INT, { .i64 = 8 }, 8, 10, FLAGS, "bit_depth" },
+    { "8", "8-bit RGBA/BGRA", 0, AV_OPT_TYPE_CONST,
+      { .i64 = 8 }, 0, 0, FLAGS, "bit_depth" },
+    { "10", "10-bit RGB10A2", 0, AV_OPT_TYPE_CONST,
+      { .i64 = 10 }, 0, 0, FLAGS, "bit_depth" },
+    { "contrast", "TrueHDR contrast", OFFSET(contrast), AV_OPT_TYPE_INT,
+      { .i64 = 100 }, 0, 200, FLAGS },
+    { "saturation", "TrueHDR saturation", OFFSET(saturation), AV_OPT_TYPE_INT,
+      { .i64 = 100 }, 0, 200, FLAGS },
+    { "middle_gray", "TrueHDR middle gray", OFFSET(middle_gray), AV_OPT_TYPE_INT,
+      { .i64 = 50 }, 10, 100, FLAGS },
+    { "luminance", "TrueHDR target peak luminance in nits", OFFSET(luminance),
+      AV_OPT_TYPE_INT, { .i64 = 650 }, 400, 2000, FLAGS },
+    { "debanding_off", "TrueHDR: skip the DL-debanding pass", OFFSET(debanding_off),
+      AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 1, FLAGS },
     { "lib_dir", "directory containing the split NVVFX runtime", OFFSET(lib_dir),
       AV_OPT_TYPE_STRING, { .str = "" }, 0, 0, FLAGS },
     { "dep_dir", "directory containing the legacy NVIDIA Video Effects runtime",

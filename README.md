@@ -1,9 +1,10 @@
 # ffmpeg-nvvfx
 
-Windows FFmpeg with NVIDIA AI video effects: **upscale, denoise, deblur, and
-remove compression artifacts** on D3D11 frames.
+Windows FFmpeg with NVIDIA AI video effects: **upscale, denoise, deblur,
+remove compression artifacts, true 10-bit, SDR→HDR10, and frame generation**
+on D3D11 frames.
 
-Adds the `nvvfx` filter:
+`nvvfx` modes:
 
 | `mode` | What it does | Output |
 |---|---|---|
@@ -11,6 +12,9 @@ Adds the `nvvfx` filter:
 | `denoise` | Remove noise | same size |
 | `deblur` | Remove blur | same size |
 | `artifact` | Remove compression artifacts | same size (max 1080p) |
+| `hdr` | SDR → HDR10 | same size, RGB10A2 |
+
+Plus the two-input `nvvfx_framegen` filter for frame interpolation.
 
 ## Setup (once)
 
@@ -21,7 +25,7 @@ redistributable 0.7.6 ([download](https://www.nvidia.com/en-us/geforce/broadcast
 C:\Program Files\NVIDIA Corporation\NVIDIA Video Effects\models
 ```
 
-**2. Install NVIDIA's runtime wheel** (needed for superres / denoise / deblur):
+**2. Install NVIDIA's runtime wheel** (needed for superres / denoise / deblur / hdr):
 
 ```bash
 python -m pip install nvidia-vfx==0.2.0.0
@@ -53,7 +57,38 @@ ffmpeg -hwaccel d3d11va -hwaccel_output_format d3d11 -i in.mkv \
   -c:v av1_nvenc -preset p5 -tune hq -rc vbr -b:v 6000k -c:a copy out.mkv
 ```
 
-**10-bit:** change `format=nv12` to `format=p010`.
+**True 10-bit (P010/X2BGR10 input → P010 output, no extra conversion):**
+
+```bash
+ffmpeg -hwaccel d3d11va -hwaccel_output_format d3d11 -i in.mkv \
+  -vf "nvvfx=mode=superres:quality=ultra:scale=2:bit_depth=10" \
+  -c:v av1_nvenc -preset p5 -tune hq -rc vbr -b:v 6000k -c:a copy out.mkv
+```
+
+**8-bit filter, 10-bit encode:** append `scale_d3d11=format=p010` instead.
+This upconverts; use `bit_depth=10` above for a true 10-bit pipeline.
+
+**SDR → HDR10:**
+
+```bash
+ffmpeg -hwaccel d3d11va -hwaccel_output_format d3d11 -i in.mkv \
+  -vf "nvvfx=mode=hdr,hwdownload,format=x2bgr10le,scale=in_range=full:out_color_matrix=bt2020nc:out_range=tv,format=p010le" \
+  -c:v hevc_nvenc -profile:v main10 -pix_fmt p010le \
+  -color_range tv -colorspace bt2020nc -color_trc smpte2084 -color_primaries bt2020 out.mkv
+```
+
+**Frame generation** (`nvvfx_framegen`, two independent inputs):
+
+```bash
+ffmpeg -init_hw_device d3d11va=dev -filter_hw_device dev \
+  -f lavfi -i testsrc2=size=1280x720:rate=30:duration=5 \
+  -f lavfi -i testsrc2=size=1280x720:rate=30:duration=5 \
+  -filter_complex "[0:v]setpts=PTS+1,format=nv12,hwupload[a];[1:v]format=nv12,hwupload[b];[a][b]nvvfx_framegen=method=time:timestep=0.5" \
+  -f null -
+```
+
+Use `method=index:frame_multiplier=4:frame_index=2` for index mode.
+`nvvfx_framegen` outputs BGRA; append `,scale_d3d11=format=nv12` for NVENC.
 
 **Other effects:**
 
@@ -71,20 +106,26 @@ nvvfx=mode=artifact:quality=conservative,nvvfx=mode=superres:quality=ultra:scale
 
 **Quality:** `low`, `medium`, `high`, `ultra`.
 For `artifact`: `conservative` or `aggressive`.
+**Strength:** `strength=0.0..1.0` for VideoSuperRes (default 1.0).
 
 ## Requirements
 
 - Windows 10/11 + NVIDIA RTX GPU
 - The Program Files model/dependency set (step 1)
-- The `nvidia-vfx` wheel for superres / denoise / deblur (step 2)
+- The `nvidia-vfx` wheel for superres / denoise / deblur / hdr (step 2)
 - `artifact` does **not** need the wheel
 
 ## Notes
 
+- Default VideoSuperRes is 8-bit. `bit_depth=10` runs true RGB10A2 and outputs
+  P010; it requires P010 or X2BGR10 input. Use it for SDR; use `mode=hdr` for
+  HDR sources.
+- `mode=hdr` outputs RGB10A2 PQ/BT.2020 (`x2bgr10le`). Always use the `scale`
+  chain above to make P010 HDR10; the D3D11 video processor does not do the
+  PQ/BT.2020 conversion correctly on current drivers.
+- `nvvfx_framegen` is RGB8-only for now.
 - `artifact` is limited to 1920x1080.
 - Don't run `artifact` and `denoise` in the same process.
-- The VFX pipeline is 8-bit. P010 output is a real 10-bit encode, but it is
-  upconverted from 8-bit.
 - `-hwaccel d3d11va -hwaccel_output_format d3d11` is the zero-copy decode path.
   `-hwaccel cuda` (NVDEC) needs a download/upload round trip.
 - Tested with `nvidia-vfx==0.2.0.0` and the Program Files models on an RTX 5080.
@@ -103,7 +144,9 @@ make -j
 <details>
 <summary><b>What changed from upstream</b></summary>
 
-- New `libavfilter/vf_nvvfx.c` (`nvvfx` filter).
+- New `libavfilter/vf_nvvfx.c` (`nvvfx` filter) and
+  `libavfilter/vf_nvvfx_framegen.c` (`nvvfx_framegen`).
+- True 10-bit VideoSuperRes, TrueHDR, and frame generation.
 - `vf_scale_d3d11.c`: fixed NV12/P010 texture allocation and color-space
   handling so GPU conversions match the source colors.
 - Docs and Changelog.

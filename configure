@@ -3565,6 +3565,7 @@ gfxcapture_filter_deps="cxx17 threads d3d11va IGraphicsCaptureItemInterop __x_AB
 gfxcapture_filter_extralibs="-lstdc++"
 scale_d3d11_filter_deps="d3d11va"
 nvvfx_filter_deps="d3d11va"
+nvvfx_framegen_filter_deps="d3d11va"
 scale_d3d12_filter_deps="d3d12va ID3D12VideoProcessor"
 deinterlace_d3d12_filter_deps="d3d12va ID3D12VideoProcessor"
 mestimate_d3d12_filter_deps="d3d12va ID3D12VideoMotionEstimator d3d12_motion_estimator"

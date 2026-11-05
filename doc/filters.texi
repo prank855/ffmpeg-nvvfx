@@ -30925,12 +30925,15 @@ NVIDIA RTX GPU, a D3D11VA device, and the NVIDIA Video Effects runtime to be
 installed by the user. No NVIDIA libraries are linked or redistributed with
 FFmpeg; they are loaded at runtime.
 
-The effect operates on RGBA or BGRA 8-bit images. NV12 and P010 input frames
-are converted to 8-bit BGRA internally with a D3D11 video processor. BGRA and
-RGBA input keeps its format. All output frames are D3D11 hardware frames.
+By default the filter processes 8-bit BGRA/RGBA; NV12 and P010 inputs are
+converted with a D3D11 video processor. With @code{bit_depth=10}, VideoSuperRes
+runs on packed RGB10A2 and outputs P010, preserving 10-bit precision. The
+@samp{hdr} mode runs TrueHDR and outputs packed RGB10A2 (@code{x2bgr10le}) in
+BT.2020 with the SMPTE ST 2084 (PQ) transfer function. All output frames are
+D3D11 hardware frames.
 
-The @samp{superres}, @samp{denoise} and @samp{deblur} effects use the newer
-@code{VideoSuperRes} runtime. The @samp{artifact} effect uses the older
+The @samp{superres}, @samp{denoise}, @samp{deblur} and @samp{hdr} effects use
+the newer runtime. The @samp{artifact} effect uses the older
 @code{ArtifactReduction} runtime installed in the standard NVIDIA Video
 Effects directory.
 
@@ -30947,6 +30950,11 @@ Deblurring. The output has the same size as the input.
 @item artifact
 Compression artifact reduction. The output has the same size as the input
 and is always BGRA. This effect supports at most 1920x1080.
+@item hdr
+SDR to HDR10 conversion (TrueHDR). The output has the same size as the input
+and is packed RGB10A2 in BT.2020/PQ. Convert it to P010 with
+@code{hwdownload,format=x2bgr10le,scale=out_color_matrix=bt2020nc:out_range=tv,format=p010le}
+before encoding.
 @end table
 
 Running @samp{artifact} and @samp{denoise} simultaneously on the same device
@@ -30962,11 +30970,35 @@ Select the quality level:
 @end table
 
 For @samp{artifact}, use @samp{conservative} or @samp{aggressive}. The default
-@samp{high} selects @samp{aggressive} for that mode.
+@samp{high} selects @samp{aggressive} for that mode. Ignored for @samp{hdr}.
 
 @item scale
 Scale factor for @samp{superres}. Accepted values are 2, 3, and 4.
 The default is 2. Ignored for the other modes.
+
+@item strength
+Strength for @samp{superres}, @samp{denoise} and @samp{deblur}, from 0.0 to
+1.0. The default is 1.0.
+
+@item bit_depth
+Select 8-bit or 10-bit VideoSuperRes processing. The default is 8.
+With @samp{10} the input must be P010 or X2BGR10 and the output is P010.
+Ignored for @samp{artifact} and @samp{hdr}.
+
+@item contrast
+TrueHDR contrast, from 0 to 200. The default is 100.
+
+@item saturation
+TrueHDR saturation, from 0 to 200. The default is 100.
+
+@item middle_gray
+TrueHDR middle-grey reference, from 10 to 100. The default is 50.
+
+@item luminance
+TrueHDR target peak luminance in nits, from 400 to 2000. The default is 650.
+
+@item debanding_off
+Set to 1 to skip the TrueHDR debanding pass. The default is 0.
 
 @item lib_dir
 Directory containing the split runtime DLLs, normally the @code{nvvfx\libs}
@@ -30988,10 +31020,17 @@ directory is used.
 @end table
 
 The runtime is loaded from the user's installation; NVIDIA DLLs and models are
-not bundled. For @samp{superres}, @samp{denoise} and @samp{deblur}, install
-NVIDIA's @code{nvidia-vfx} wheel (@code{pip install nvidia-vfx}) and point
-@var{lib_dir} at its @code{nvvfx\libs} directory. The wheel does not include
-the model files; they come from the Program Files runtime.
+not bundled. For @samp{superres}, @samp{denoise}, @samp{deblur} and @samp{hdr},
+install NVIDIA's @code{nvidia-vfx} wheel (@code{pip install nvidia-vfx}) and
+point @var{lib_dir} at its @code{nvvfx\libs} directory. The wheel does not
+include the model files; they come from the Program Files runtime.
+
+For 8-bit VideoSuperRes the output is BGRA or RGBA; use @code{scale_d3d11} to
+convert it to NV12 or P010 before encoding. With @code{bit_depth=10} the output
+is P010 and can be encoded directly. For @samp{hdr} the output is X2BGR10;
+convert it with @code{hwdownload,format=x2bgr10le} and @code{scale} using the
+BT.2020 matrix, because the D3D11 video processor does not perform the
+PQ/BT.2020 conversion correctly on current drivers.
 
 @subsection Examples
 
@@ -31017,6 +31056,75 @@ Compression artifact reduction:
 @example
 ffmpeg -hwaccel d3d11va -hwaccel_output_format d3d11 -i input.mkv \
        -vf nvvfx=mode=artifact:quality=conservative -f null -
+@end example
+
+10-bit super resolution (P010 input and output):
+@example
+ffmpeg -hwaccel d3d11va -hwaccel_output_format d3d11 -i input.mkv \
+       -vf nvvfx=mode=superres:quality=ultra:scale=2:bit_depth=10 \
+       -c:v av1_nvenc -preset p5 output.mkv
+@end example
+
+SDR to HDR10:
+@example
+ffmpeg -hwaccel d3d11va -hwaccel_output_format d3d11 -i input.mkv \
+       -vf "nvvfx=mode=hdr,hwdownload,format=x2bgr10le,scale=in_range=full:out_color_matrix=bt2020nc:out_range=tv,format=p010le" \
+       -c:v hevc_nvenc -profile:v main10 -pix_fmt p010le \
+       -color_range tv -colorspace bt2020nc -color_trc smpte2084 \
+       -color_primaries bt2020 output.mkv
+@end example
+
+@section nvvfx_framegen
+
+Generate an intermediate frame from a previous/current frame pair using
+NVIDIA's @code{VideoFrameGeneration} effect. The filter has two D3D11 video
+inputs, named @samp{previous} and @samp{current}, and one D3D11 output.
+
+@table @option
+@item mode
+Generation quality: @samp{low}, @samp{medium} (default), or @samp{high}.
+
+@item method
+@samp{time} (default) uses @option{timestep}; @samp{index} uses
+@option{frame_multiplier} and @option{frame_index}.
+
+@item timestep
+Temporal position of the generated frame in the open interval (0, 1).
+The default is 0.5.
+
+@item frame_multiplier
+Frame-rate multiplier for index mode, from 2 to 8. The default is 2.
+
+@item frame_index
+One-based intermediate frame index for index mode, from 1 to
+@option{frame_multiplier} - 1. The default is 1.
+
+@item shot_change
+Mark this input pair as a shot change.
+
+@item auto_shot_change
+Enable automatic shot-change detection. Enabled by default.
+
+@item encoding
+@samp{rgb8} (default) or @samp{rgb10a2}. The 10-bit path is not implemented
+yet.
+
+@item lib_dir
+@item dep_dir
+Same as for @command{nvvfx}.
+@end table
+
+The two inputs must be independent frames with the same dimensions. Pair
+frames from separate inputs (or with a shifted PTS); a pair that references
+the same decoded frame is rejected.
+
+Example:
+@example
+ffmpeg -init_hw_device d3d11va=dev -filter_hw_device dev \
+  -f lavfi -i testsrc2=size=1280x720:rate=30:duration=5 \
+  -f lavfi -i testsrc2=size=1280x720:rate=30:duration=5 \
+  -filter_complex "[0:v]setpts=PTS+1,format=nv12,hwupload[a];[1:v]format=nv12,hwupload[b];[a][b]nvvfx_framegen=method=time:timestep=0.5" \
+  -f null -
 @end example
 
 @section gfxcapture
