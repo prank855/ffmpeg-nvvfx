@@ -59,3 +59,6 @@
 # Local test media
 /in.mkv
 /out.mkv
+
+# Local nvvfx runtime junction
+/nvvfx/
