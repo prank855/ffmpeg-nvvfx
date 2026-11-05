@@ -154,6 +154,7 @@ static int scale_d3d11_filter_frame(AVFilterLink *inlink, AVFrame *in)
     ID3D11VideoContext *videoContext = NULL;
     AVFrame *out = NULL;
     int ret = 0;
+    int matrix_601;
     HRESULT hr;
 
     ///< Validate input frame
@@ -161,6 +162,7 @@ static int scale_d3d11_filter_frame(AVFilterLink *inlink, AVFrame *in)
         av_log(ctx, AV_LOG_ERROR, "Null input frame\n");
         return AVERROR(EINVAL);
     }
+    matrix_601 = in->height <= 576;
 
     if (!in->hw_frames_ctx) {
         av_log(ctx, AV_LOG_ERROR, "No hardware frames context in input frame\n");
@@ -266,6 +268,42 @@ static int scale_d3d11_filter_frame(AVFilterLink *inlink, AVFrame *in)
         goto fail;
     }
 
+    {
+        int rgb_in = s->input_format == DXGI_FORMAT_B8G8R8A8_UNORM ||
+                     s->input_format == DXGI_FORMAT_R8G8B8A8_UNORM;
+        D3D11_VIDEO_PROCESSOR_COLOR_SPACE in_csp = {
+            .Usage = 0,
+            .RGB_Range = 0,
+            .Nominal_Range = rgb_in ? D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255
+                                    : D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235,
+        };
+        D3D11_VIDEO_PROCESSOR_COLOR_SPACE out_csp = {
+            .Usage = 0,
+            .Nominal_Range = D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235,
+        };
+
+        switch (in->colorspace) {
+        case AVCOL_SPC_BT470BG:
+        case AVCOL_SPC_SMPTE170M:
+            matrix_601 = 1;
+            break;
+        case AVCOL_SPC_BT709:
+        case AVCOL_SPC_BT2020_NCL:
+        case AVCOL_SPC_BT2020_CL:
+            matrix_601 = 0;
+            break;
+        }
+        in_csp.YCbCr_Matrix = !matrix_601;
+        out_csp.YCbCr_Matrix = !matrix_601;
+
+        videoContext->lpVtbl->VideoProcessorSetStreamColorSpace(videoContext,
+                                                                s->processor, 0,
+                                                                &in_csp);
+        videoContext->lpVtbl->VideoProcessorSetOutputColorSpace(videoContext,
+                                                                s->processor,
+                                                                &out_csp);
+    }
+
     ///< Process the frame
     hr = videoContext->lpVtbl->VideoProcessorBlt(videoContext, s->processor, s->outputView, 0, 1, &stream);
     if (FAILED(hr)) {
@@ -286,6 +324,8 @@ static int scale_d3d11_filter_frame(AVFilterLink *inlink, AVFrame *in)
     out->width = s->width;
     out->height = s->height;
     out->format = AV_PIX_FMT_D3D11;
+    out->color_range = AVCOL_RANGE_MPEG;
+    out->colorspace = matrix_601 ? AVCOL_SPC_BT470BG : AVCOL_SPC_BT709;
 
     ///< Clean up resources
     inputView->lpVtbl->Release(inputView);
@@ -373,14 +413,13 @@ static int scale_d3d11_config_props(AVFilterLink *outlink)
     frames_ctx->sw_format = s->format;
     frames_ctx->width = s->width;
     frames_ctx->height = s->height;
-    frames_ctx->initial_pool_size = 10;
-
-    if (ctx->extra_hw_frames > 0)
-        frames_ctx->initial_pool_size += ctx->extra_hw_frames;
+    /* D3D11 rejects static array textures with RENDER_TARGET for NV12/P010,
+     * so let the pool allocate individual textures on demand. */
+    frames_ctx->initial_pool_size = 0;
 
     AVD3D11VAFramesContext *frames_hwctx = frames_ctx->hwctx;
     frames_hwctx->MiscFlags = 0;
-    frames_hwctx->BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_VIDEO_ENCODER;
+    frames_hwctx->BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
 
     ret = av_hwframe_ctx_init(s->hw_frames_ctx_out);
     if (ret < 0) {

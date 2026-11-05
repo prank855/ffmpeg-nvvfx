@@ -2,6 +2,7 @@ Entries are sorted chronologically from oldest to youngest within each release,
 releases are sorted from youngest to oldest.
 
 version <next>:
+- NVIDIA Video Effects (VideoSuperRes and ArtifactReduction) filter
 - DTS:X height channels in the DCA decoder
 - LCEVC raw demuxer and muxer
 - AVS+ (AVS1-P16, Broadcasting profile) support in the Chinese AVS decoder

@@ -30918,6 +30918,99 @@ ddagrab=video_size=800x600:offset_x=100:offset_y=100
 @end example
 
 
+@section nvvfx
+
+Apply NVIDIA Video Effects to D3D11 hardware frames. The filter requires an
+NVIDIA RTX GPU, a D3D11VA device, and the NVIDIA Video Effects runtime to be
+installed by the user. No NVIDIA libraries are linked or redistributed with
+FFmpeg; they are loaded at runtime.
+
+The effect operates on RGBA or BGRA 8-bit images. NV12 and P010 input frames
+are converted to 8-bit BGRA internally with a D3D11 video processor. BGRA and
+RGBA input keeps its format. All output frames are D3D11 hardware frames.
+
+The @samp{superres}, @samp{denoise} and @samp{deblur} effects use the newer
+@code{VideoSuperRes} runtime. The @samp{artifact} effect uses the older
+@code{ArtifactReduction} runtime installed in the standard NVIDIA Video
+Effects directory.
+
+@table @option
+@item mode
+Select the effect:
+@table @samp
+@item superres
+Super resolution upscaling. The output is @var{scale} times the input size.
+@item denoise
+Denoising. The output has the same size as the input.
+@item deblur
+Deblurring. The output has the same size as the input.
+@item artifact
+Compression artifact reduction. The output has the same size as the input
+and is always BGRA. This effect supports at most 1920x1080.
+@end table
+
+Running @samp{artifact} and @samp{denoise} simultaneously on the same device
+is not recommended.
+
+@item quality
+Select the quality level:
+@table @samp
+@item low
+@item medium
+@item high
+@item ultra
+@end table
+
+For @samp{artifact}, use @samp{conservative} or @samp{aggressive}. The default
+@samp{high} selects @samp{aggressive} for that mode.
+
+@item scale
+Scale factor for @samp{superres}. Accepted values are 2, 3, and 4.
+The default is 2. Ignored for the other modes.
+
+@item lib_dir
+Directory containing the split runtime (@code{NVVideoEffects.dll},
+@code{nvVFXVideoSuperRes.dll}, @code{nvngxruntime.dll}, @code{nvngx_vsr.dll}).
+By default the filter searches @code{nvvfx\libs} and @code{libs} next to the
+ffmpeg executable, the @env{NVVFX_LIB_DIR} environment variable, and the
+standard NVIDIA Video Effects installation directory.
+On the command line a Windows drive path must escape the colon, for example
+@code{lib_dir=C\:/path/to/libs}, or the @env{NVVFX_LIB_DIR} environment
+variable can be used instead.
+
+@item dep_dir
+Directory containing the NVIDIA Video Effects dependency set (NPP, TensorRT,
+CUDA runtime) used by the models. By default the standard
+@code{C:\Program Files\NVIDIA Corporation\NVIDIA Video Effects} directory is
+used.
+@end table
+
+@subsection Examples
+
+Denoise:
+@example
+ffmpeg -hwaccel d3d11va -hwaccel_output_format d3d11 -i input.mkv \
+       -vf nvvfx=mode=denoise:quality=ultra -f null -
+@end example
+
+Deblur:
+@example
+ffmpeg -hwaccel d3d11va -hwaccel_output_format d3d11 -i input.mkv \
+       -vf nvvfx=mode=deblur:quality=high -f null -
+@end example
+
+Super resolution, 2x:
+@example
+ffmpeg -hwaccel d3d11va -hwaccel_output_format d3d11 -i input.mkv \
+       -vf nvvfx=mode=superres:quality=high:scale=2 -f null -
+@end example
+
+Compression artifact reduction:
+@example
+ffmpeg -hwaccel d3d11va -hwaccel_output_format d3d11 -i input.mkv \
+       -vf nvvfx=mode=artifact:quality=conservative -f null -
+@end example
+
 @section gfxcapture
 
 Capture windows or monitors using Windows.Graphics.Capture API.
