@@ -30969,8 +30969,10 @@ Scale factor for @samp{superres}. Accepted values are 2, 3, and 4.
 The default is 2. Ignored for the other modes.
 
 @item lib_dir
-Directory containing the split runtime (@code{NVVideoEffects.dll},
-@code{nvVFXVideoSuperRes.dll}, @code{nvngxruntime.dll}, @code{nvngx_vsr.dll}).
+Directory containing the split runtime DLLs, normally the @code{nvvfx\libs}
+directory from NVIDIA's @code{nvidia-vfx} Python wheel. It must contain
+@code{NVVideoEffects.dll}, @code{nvVFXVideoSuperRes.dll},
+@code{nvngxruntime.dll} and @code{nvngx_vsr.dll}.
 By default the filter searches @code{nvvfx\libs} and @code{libs} next to the
 ffmpeg executable, the @env{NVVFX_LIB_DIR} environment variable, and the
 standard NVIDIA Video Effects installation directory.
@@ -30979,11 +30981,17 @@ On the command line a Windows drive path must escape the colon, for example
 variable can be used instead.
 
 @item dep_dir
-Directory containing the NVIDIA Video Effects dependency set (NPP, TensorRT,
-CUDA runtime) used by the models. By default the standard
-@code{C:\Program Files\NVIDIA Corporation\NVIDIA Video Effects} directory is
-used.
+Directory containing the NVIDIA Video Effects dependency and model set (NPP,
+TensorRT, the CUDA runtime and the @code{models} directory). By default the
+standard @code{C:\Program Files\NVIDIA Corporation\NVIDIA Video Effects}
+directory is used.
 @end table
+
+The runtime is loaded from the user's installation; NVIDIA DLLs and models are
+not bundled. For @samp{superres}, @samp{denoise} and @samp{deblur}, install
+NVIDIA's @code{nvidia-vfx} wheel (@code{pip install nvidia-vfx}) and point
+@var{lib_dir} at its @code{nvvfx\libs} directory. The wheel does not include
+the model files; they come from the Program Files runtime.
 
 @subsection Examples
 
