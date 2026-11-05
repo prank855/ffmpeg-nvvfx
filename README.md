@@ -16,6 +16,10 @@ on D3D11 frames.
 
 Plus the two-input `nvvfx_framegen` filter for frame interpolation.
 
+The release binaries are `ffmpeg-nvvfx.exe` and `ffprobe-nvvfx.exe`. A source
+build still produces `ffmpeg.exe`/`ffprobe.exe`; copy or rename them if you
+want the fork name.
+
 ## Setup (once)
 
 **1. Install the NVIDIA models.** Use the NVIDIA Broadcast Video Effects
@@ -39,7 +43,7 @@ python -m pip install nvidia-vfx==0.2.0.0
 export NVVFX_LIB_DIR='C:\path\to\venv\Lib\site-packages\nvvfx\libs'
 ```
 
-Or make it automatic with a junction beside `ffmpeg.exe`:
+Or make it automatic with a junction beside `ffmpeg-nvvfx.exe`:
 
 ```powershell
 New-Item -ItemType Junction -Path 'C:\path\to\ffmpeg-nvvfx-win64\nvvfx\libs' -Target 'C:\path\to\venv\Lib\site-packages\nvvfx\libs'
@@ -52,7 +56,7 @@ Done. No NVIDIA DLLs or models are bundled with this fork.
 **Most common — 8-bit, zero-copy to AV1 NVENC:**
 
 ```bash
-ffmpeg -hwaccel d3d11va -hwaccel_output_format d3d11 -i in.mkv \
+ffmpeg-nvvfx -hwaccel d3d11va -hwaccel_output_format d3d11 -i in.mkv \
   -vf "nvvfx=mode=superres:quality=ultra:scale=2,scale_d3d11=format=nv12" \
   -c:v av1_nvenc -preset p5 -tune hq -rc vbr -b:v 6000k -c:a copy out.mkv
 ```
@@ -60,7 +64,7 @@ ffmpeg -hwaccel d3d11va -hwaccel_output_format d3d11 -i in.mkv \
 **True 10-bit (P010/X2BGR10 input → P010 output, no extra conversion):**
 
 ```bash
-ffmpeg -hwaccel d3d11va -hwaccel_output_format d3d11 -i in.mkv \
+ffmpeg-nvvfx -hwaccel d3d11va -hwaccel_output_format d3d11 -i in.mkv \
   -vf "nvvfx=mode=superres:quality=ultra:scale=2:bit_depth=10" \
   -c:v av1_nvenc -preset p5 -tune hq -rc vbr -b:v 6000k -c:a copy out.mkv
 ```
@@ -71,7 +75,7 @@ This upconverts; use `bit_depth=10` above for a true 10-bit pipeline.
 **SDR → HDR10:**
 
 ```bash
-ffmpeg -hwaccel d3d11va -hwaccel_output_format d3d11 -i in.mkv \
+ffmpeg-nvvfx -hwaccel d3d11va -hwaccel_output_format d3d11 -i in.mkv \
   -vf "nvvfx=mode=hdr,hwdownload,format=x2bgr10le,scale=in_range=full:out_color_matrix=bt2020nc:out_range=tv,format=p010le" \
   -c:v hevc_nvenc -profile:v main10 -pix_fmt p010le \
   -color_range tv -colorspace bt2020nc -color_trc smpte2084 -color_primaries bt2020 out.mkv
@@ -80,7 +84,7 @@ ffmpeg -hwaccel d3d11va -hwaccel_output_format d3d11 -i in.mkv \
 **Frame generation** (`nvvfx_framegen`, two independent inputs):
 
 ```bash
-ffmpeg -init_hw_device d3d11va=dev -filter_hw_device dev \
+ffmpeg-nvvfx -init_hw_device d3d11va=dev -filter_hw_device dev \
   -f lavfi -i testsrc2=size=1280x720:rate=30:duration=5 \
   -f lavfi -i testsrc2=size=1280x720:rate=30:duration=5 \
   -filter_complex "[0:v]setpts=PTS+1,format=nv12,hwupload[a];[1:v]format=nv12,hwupload[b];[a][b]nvvfx_framegen=method=time:timestep=0.5" \
