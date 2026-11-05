@@ -1,0 +1,217 @@
+:root {
+  color-scheme: light;
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --ink: #17191d;
+  --muted: #5f6670;
+  --line: #d9dde3;
+  --accent: #1f6feb;
+  --accent-ink: #ffffff;
+  --code-bg: #0e1116;
+  --code-ink: #e6edf3;
+  --warn: #8a5a00;
+}
+
+* { box-sizing: border-box; }
+
+html, body { margin: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+.wrap {
+  width: min(1180px, calc(100% - 32px));
+  margin: 0 auto;
+}
+
+.hero {
+  background: #0e1116;
+  color: #f0f4f8;
+  padding: 40px 0 32px;
+  border-bottom: 1px solid #252b34;
+}
+
+.eyebrow {
+  margin: 0 0 8px;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  font-size: 12px;
+  color: #9fb0c5;
+}
+
+h1 {
+  margin: 0 0 10px;
+  font-size: clamp(28px, 4vw, 46px);
+  line-height: 1.1;
+  letter-spacing: -.02em;
+}
+
+.lede {
+  margin: 0 0 14px;
+  color: #b9c6d6;
+  font-size: 18px;
+}
+
+.links { display: flex; gap: 18px; flex-wrap: wrap; margin: 0; }
+.links a { color: #8fc2ff; text-decoration: none; font-weight: 600; }
+.links a:hover { text-decoration: underline; }
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+  gap: 20px;
+  padding: 24px 0 40px;
+  align-items: start;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 20px;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, .04);
+}
+
+h2 {
+  margin: 0 0 14px;
+  font-size: 18px;
+  letter-spacing: -.01em;
+}
+
+h3 {
+  margin: 24px 0 10px;
+  font-size: 15px;
+}
+
+form h2 + .row { margin-top: 0; }
+form h2:not(:first-child) { margin-top: 26px; padding-top: 20px; border-top: 1px solid var(--line); }
+
+.row {
+  display: grid;
+  grid-template-columns: 130px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  margin: 10px 0;
+}
+
+label { font-weight: 600; font-size: 14px; color: #333941; }
+
+input[type="text"], input[type="number"], input:not([type]), select {
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfd;
+  color: var(--ink);
+  font: inherit;
+}
+
+input:focus, select:focus, button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  margin-top: 14px;
+}
+
+.checks label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.checks input { accent-color: var(--accent); }
+
+.command-card { position: sticky; top: 18px; }
+
+.command-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.command-head h2 { margin: 0; }
+
+button {
+  border: 0;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font: inherit;
+  font-weight: 700;
+  padding: 9px 14px;
+  cursor: pointer;
+}
+
+button:hover { filter: brightness(1.08); }
+button.secondary { background: #e8edf5; color: #1b3b66; }
+
+pre {
+  margin: 14px 0 0;
+  padding: 14px;
+  background: var(--code-bg);
+  color: var(--code-ink);
+  border-radius: 10px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+code { font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; }
+pre code { font-size: 13px; line-height: 1.55; }
+
+.note {
+  margin: 12px 0 0;
+  color: var(--warn);
+  font-size: 14px;
+  min-height: 1.4em;
+}
+
+.presets { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.presets button {
+  background: #eef2f7;
+  color: #1d2a3a;
+  font-weight: 600;
+  padding: 8px 10px;
+  font-size: 14px;
+}
+
+.quick {
+  margin: 0;
+  padding-left: 20px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.quick li { margin: 6px 0; }
+.quick code { background: #eef2f7; padding: 1px 5px; border-radius: 4px; color: #1d2a3a; }
+
+footer {
+  padding: 0 0 40px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.is-hidden { display: none !important; }
+
+@media (max-width: 900px) {
+  .layout { grid-template-columns: 1fr; }
+  .command-card { position: static; }
+}
+
+@media (max-width: 560px) {
+  .row { grid-template-columns: 1fr; gap: 6px; }
+  .checks { flex-direction: column; gap: 8px; }
+}

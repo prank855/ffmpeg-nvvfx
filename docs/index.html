@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ffmpeg-nvvfx command builder</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="hero">
+  <div class="wrap">
+    <p class="eyebrow">ffmpeg-nvvfx</p>
+    <h1>Build your NVIDIA VFX ffmpeg command</h1>
+    <p class="lede">Pick what you want. Copy the command. No NVIDIA DLLs are bundled.</p>
+    <p class="links">
+      <a href="https://github.com/prank855/ffmpeg-nvvfx">GitHub</a>
+      <a href="https://github.com/prank855/ffmpeg-nvvfx/releases">Releases</a>
+      <a href="https://github.com/prank855/ffmpeg-nvvfx#readme">README</a>
+    </p>
+  </div>
+</header>
+
+<main class="wrap layout">
+  <form id="builder" class="card" autocomplete="off">
+    <h2>1. Files</h2>
+    <div class="row">
+      <label for="input">Input</label>
+      <input id="input" value="input.mkv">
+    </div>
+    <div class="row">
+      <label for="output">Output</label>
+      <input id="output" value="output.mkv">
+    </div>
+    <div class="row">
+      <label for="libDir">Runtime libs</label>
+      <input id="libDir" placeholder="C:\path\to\nvvfx\libs (blank if nvvfx\libs is beside ffmpeg)">
+    </div>
+    <div class="row">
+      <label for="shell">Shell</label>
+      <select id="shell">
+        <option value="bash">Git Bash</option>
+        <option value="cmd">cmd.exe</option>
+      </select>
+    </div>
+
+    <h2>2. Effect</h2>
+    <div class="row">
+      <label for="mode">Mode</label>
+      <select id="mode">
+        <option value="superres">Super resolution</option>
+        <option value="denoise">Denoise</option>
+        <option value="deblur">Deblur</option>
+        <option value="artifact">Artifact reduction</option>
+        <option value="artifact+superres">Artifact + super resolution</option>
+        <option value="hdr">SDR → HDR10</option>
+      </select>
+    </div>
+    <div class="row" data-show="vsr">
+      <label for="quality">Quality</label>
+      <select id="quality">
+        <option value="low">low</option>
+        <option value="medium">medium</option>
+        <option value="high">high</option>
+        <option value="ultra" selected>ultra</option>
+      </select>
+    </div>
+    <div class="row" data-show="artifact">
+      <label for="artifactQuality">Artifact quality</label>
+      <select id="artifactQuality">
+        <option value="conservative" selected>conservative</option>
+        <option value="aggressive">aggressive</option>
+      </select>
+    </div>
+    <div class="row" data-show="scale">
+      <label for="scale">Scale</label>
+      <select id="scale">
+        <option value="2" selected>2x</option>
+        <option value="3">3x</option>
+        <option value="4">4x</option>
+      </select>
+    </div>
+    <div class="row" data-show="depth">
+      <label for="bitDepth">Bit depth</label>
+      <select id="bitDepth">
+        <option value="8" selected>8-bit BGRA → NV12</option>
+        <option value="10">true 10-bit RGB10A2 → P010</option>
+      </select>
+    </div>
+    <div class="row" data-show="strength">
+      <label for="strength">Strength</label>
+      <input id="strength" type="number" min="0" max="1" step="0.05" placeholder="1.0 (default)">
+    </div>
+
+    <h2>3. Decode &amp; encode</h2>
+    <div class="row">
+      <label for="decode">Decode</label>
+      <select id="decode">
+        <option value="d3d11" selected>D3D11VA (zero-copy)</option>
+        <option value="nvdec">NVDEC (upload)</option>
+      </select>
+    </div>
+    <div class="row">
+      <label for="encoder">Encoder</label>
+      <select id="encoder">
+        <option value="av1_nvenc" selected>AV1 NVENC</option>
+        <option value="hevc_nvenc">HEVC NVENC</option>
+        <option value="h264_nvenc">H.264 NVENC</option>
+      </select>
+    </div>
+    <div class="row">
+      <label for="preset">Preset</label>
+      <select id="preset">
+        <option value="p4">p4</option>
+        <option value="p5" selected>p5</option>
+        <option value="p6">p6</option>
+        <option value="p7">p7</option>
+      </select>
+    </div>
+    <div class="row">
+      <label for="bitrate">Bitrate</label>
+      <input id="bitrate" value="6000k">
+    </div>
+    <div class="row">
+      <label for="duration">Limit</label>
+      <input id="duration" placeholder="00:05:00 (blank = full)">
+    </div>
+    <div class="checks">
+      <label><input id="copyAudio" type="checkbox" checked> all audio</label>
+      <label><input id="copySubs" type="checkbox" checked> subtitles</label>
+      <label><input id="copyAttachments" type="checkbox" checked> attachments</label>
+      <label><input id="overwrite" type="checkbox" checked> overwrite</label>
+    </div>
+  </form>
+
+  <section class="card command-card">
+    <div class="command-head">
+      <h2>Your command</h2>
+      <button id="copy" type="button">Copy</button>
+    </div>
+    <pre><code id="command">…</code></pre>
+    <p class="note" id="note"></p>
+
+    <h3>Presets</h3>
+    <div class="presets">
+      <button type="button" data-preset="8bit">8-bit upscale</button>
+      <button type="button" data-preset="10bit">10-bit upscale</button>
+      <button type="button" data-preset="denoise">Denoise</button>
+      <button type="button" data-preset="artifact">Artifact</button>
+      <button type="button" data-preset="chain">Artifact + upscale</button>
+      <button type="button" data-preset="hdr">SDR → HDR10</button>
+    </div>
+
+    <h3>Before you run it</h3>
+    <ul class="quick">
+      <li>Install the NVIDIA VFX SDK 1.3 features, or the <code>nvidia-vfx</code> wheel + Program Files 0.7.6 runtime.</li>
+      <li>Point <code>NVVFX_LIB_DIR</code> at the flat <code>nvvfx\libs</code> folder, or put it beside <code>ffmpeg-nvvfx.exe</code>.</li>
+      <li>10-bit needs P010/X2BGR10 input. HDR input should use <code>mode=hdr</code>.</li>
+      <li>Artifact reduction is limited to 1920x1080.</li>
+    </ul>
+  </section>
+</main>
+
+<footer class="wrap">
+  <p>Static command builder. NVIDIA runtime DLLs and models are not distributed here.</p>
+</footer>
+
+<script src="generator.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

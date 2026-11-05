@@ -1,5 +1,7 @@
 # ffmpeg-nvvfx
 
+**Command builder:** <https://prank855.github.io/ffmpeg-nvvfx/>
+
 Windows FFmpeg with NVIDIA AI video effects: **upscale, denoise, deblur,
 remove compression artifacts, true 10-bit, SDR→HDR10, and frame generation**
 on D3D11 frames.
