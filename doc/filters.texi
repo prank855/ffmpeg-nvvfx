@@ -30982,8 +30982,22 @@ Strength for @samp{superres}, @samp{denoise} and @samp{deblur}, from 0.0 to
 
 @item bit_depth
 Select 8-bit or 10-bit VideoSuperRes processing. The default is 8.
-With @samp{10} the input must be P010 or X2BGR10 and the output is P010.
-Ignored for @samp{artifact} and @samp{hdr}.
+With @samp{10} the input must be P010 or X2BGR10 and the output is P010
+(BGRA for 8-bit). To process an 8-bit source in 10-bit, convert it first with
+@code{scale_d3d11=format=p010}. Ignored for @samp{artifact} and @samp{hdr}.
+
+@item out_w
+@item out_h
+Explicit output width and height for @samp{superres}. Zero means automatic
+from @option{scale}. Arbitrary upscaling is supported; downscaling is
+rejected. Ignored for the other modes.
+
+@item hdr
+Control HDR/PQ handling for 10-bit @samp{superres}: @samp{auto} (default),
+@samp{on}, or @samp{off}. With @samp{on} the input is interpreted as
+PQ/BT.2020 and the output is packed RGB10A2 tagged as HDR10; use
+@code{hwdownload,format=x2bgr10le,scale=in_range=full:out_color_matrix=bt2020nc:out_range=tv,format=p010le}
+before encoding.
 
 @item contrast
 TrueHDR contrast, from 0 to 200. The default is 100.
@@ -31106,8 +31120,8 @@ Mark this input pair as a shot change.
 Enable automatic shot-change detection. Enabled by default.
 
 @item encoding
-@samp{rgb8} (default) or @samp{rgb10a2}. The 10-bit path is not implemented
-yet.
+@samp{rgb8} (default) or @samp{rgb10a2}. The 10-bit path uses RGB10A2/P32
+and requires P010 or X2BGR10 input.
 
 @item lib_dir
 @item dep_dir
@@ -31125,6 +31139,90 @@ ffmpeg -init_hw_device d3d11va=dev -filter_hw_device dev \
   -f lavfi -i testsrc2=size=1280x720:rate=30:duration=5 \
   -filter_complex "[0:v]setpts=PTS+1,format=nv12,hwupload[a];[1:v]format=nv12,hwupload[b];[a][b]nvvfx_framegen=method=time:timestep=0.5" \
   -f null -
+@end example
+
+@section nvvfx_upscale
+
+Fast 8-bit upscaling using NVIDIA's @code{Upscale} effect. The filter accepts
+D3D11 frames in NV12, P010, BGRA or RGBA and outputs D3D11 BGRA. P010 is
+down-converted to 8-bit.
+
+@table @option
+@item ratio
+Upscale ratio: @samp{4/3}, @samp{3/2}, @samp{2}, @samp{3}, or @samp{4}.
+The output dimensions must be exact integers, and the ratio must match in
+both directions. Ratios such as 2.5x and 1x are rejected.
+
+@item strength
+Sharpening strength from 0.0 to 1.0. The default is 0.4.
+
+@item lib_dir
+@item dep_dir
+Same as for @command{nvvfx}.
+@end table
+
+@example
+ffmpeg -hwaccel d3d11va -hwaccel_output_format d3d11 -i input.mkv        -vf "nvvfx_upscale=ratio=3/2:strength=0.5,scale_d3d11=format=nv12"        -c:v av1_nvenc output.mkv
+@end example
+
+@section nvvfx_denoise
+
+NVIDIA TensorRT video denoising. This is the dedicated @code{Denoising}
+effect, not the VideoSuperRes denoise modes. Input and output are D3D11 BGRA
+at the same dimensions; P010 is down-converted to 8-bit. The supported size
+range is 80p through 1080p.
+
+@table @option
+@item strength
+Denoising strength from 0.0 to 1.0. The model quantizes this into two levels
+at 0.5. The default is 0.5.
+
+@item model_dir
+Directory containing @code{Denoise-agg-100.engine.trtpkg} and
+@code{Denoise-con-100.engine.trtpkg}. If unset, the filter searches
+@code{models} under the runtime directory and the legacy dependency directory.
+
+@item lib_dir
+@item dep_dir
+Same as for @command{nvvfx}.
+@end table
+
+@example
+ffmpeg -hwaccel d3d11va -hwaccel_output_format d3d11 -i input.mkv        -vf "nvvfx_denoise=strength=0.5,scale_d3d11=format=nv12"        -c:v av1_nvenc output.mkv
+@end example
+
+@section nvvfx_framerate
+
+Automatic frame-rate conversion with NVIDIA's @code{VideoFrameGeneration}
+effect. For each input pair, the filter emits @option{multiplier} - 1
+generated frames plus the original current frame, and sets the output frame
+rate to @option{multiplier} times the input. The first input frame is passed
+through unchanged.
+
+@table @option
+@item multiplier
+Frame-rate multiplier from 2 to 8. The default is 2.
+
+@item mode
+Generation quality: @samp{low}, @samp{medium} (default), or @samp{high}.
+
+@item encoding
+@samp{rgb8} (default) or @samp{rgb10a2}. The 10-bit path requires P010 or
+X2BGR10 input and outputs P010.
+
+@item auto_shot_change
+Enable automatic shot-change detection. Enabled by default.
+
+@item shot_change
+Mark all input pairs as shot changes.
+
+@item lib_dir
+@item dep_dir
+Same as for @command{nvvfx}.
+@end table
+
+@example
+ffmpeg -hwaccel d3d11va -hwaccel_output_format d3d11 -i input.mkv        -vf "nvvfx_framerate=multiplier=2:encoding=rgb10a2"        -c:v av1_nvenc output.mkv
 @end example
 
 @section gfxcapture

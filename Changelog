@@ -4,6 +4,7 @@ releases are sorted from youngest to oldest.
 version <next>:
 - NVIDIA Video Effects (VideoSuperRes and ArtifactReduction) filter
 - NVIDIA Video Effects 10-bit VideoSuperRes, VideoFrameGeneration and TrueHDR
+- NVIDIA Video Effects arbitrary output, HDR/PQ VideoSuperRes, Upscale, Denoising and frame-rate conversion
 - DTS:X height channels in the DCA decoder
 - LCEVC raw demuxer and muxer
 - AVS+ (AVS1-P16, Broadcasting profile) support in the Chinese AVS decoder

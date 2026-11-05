@@ -150,13 +150,28 @@ enum NVVFXQuality {
     QUALITY_NB
 };
 
+enum NVVFXHdrMode {
+    HDR_AUTO,
+    HDR_ON,
+    HDR_OFF,
+    HDR_NB
+};
+
+/* Largest 2D texture size at D3D11 feature level 11_0. */
+#define NVVFX_MAX_DIM 16384
+
 typedef struct NVVFXContext {
     const AVClass *class;
 
     int mode;
     int quality;
     int scale;
+    int out_w;
+    int out_h;
     int bit_depth;
+    int hdr;
+    int hdr_out;
+    int packed_out;
     float strength;
     int contrast;
     int saturation;
@@ -170,6 +185,7 @@ typedef struct NVVFXContext {
     ID3D11DeviceContext *device_ctx;
     ID3D11VideoDevice *video_device;
     ID3D11VideoContext *video_context;
+    ID3D11VideoContext1 *video_context1;
     ID3D11VideoProcessorEnumerator *vp_enum;
     ID3D11VideoProcessor *vp;
     ID3D11VideoProcessorOutputView *vp_out_view;
@@ -272,6 +288,26 @@ static av_cold int nvvfx_init(AVFilterContext *ctx)
         return AVERROR(EINVAL);
     }
 
+    if (s->mode != MODE_SUPERRES && (s->out_w || s->out_h)) {
+        av_log(ctx, AV_LOG_ERROR, "nvvfx: out_w/out_h are only supported with "
+               "mode=superres; denoise, deblur and artifact keep the input "
+               "dimensions.\n");
+        return AVERROR(EINVAL);
+    }
+
+    if (s->hdr == HDR_ON &&
+        (s->mode != MODE_SUPERRES || s->bit_depth != 10)) {
+        av_log(ctx, AV_LOG_ERROR, "nvvfx: hdr=on requires mode=superres and "
+               "bit_depth=10.\n");
+        return AVERROR(EINVAL);
+    }
+
+    if ((s->out_w > NVVFX_MAX_DIM) || (s->out_h > NVVFX_MAX_DIM)) {
+        av_log(ctx, AV_LOG_ERROR, "nvvfx: out_w/out_h must not exceed %d.\n",
+               NVVFX_MAX_DIM);
+        return AVERROR(EINVAL);
+    }
+
     return 0;
 }
 
@@ -299,6 +335,72 @@ static int nvvfx_input_needs_vp(const NVVFXContext *s)
 
     return s->in_sw_format == AV_PIX_FMT_NV12 ||
            s->in_sw_format == AV_PIX_FMT_P010;
+}
+
+/* SuperRes accepts any output size at least as large as the input; the
+ * denoise/deblur/artifact effects keep the input dimensions. */
+static void nvvfx_output_dims(const NVVFXContext *s, int width, int height,
+                              int *out_width, int *out_height)
+{
+    if (s->mode == MODE_SUPERRES) {
+        *out_width  = s->out_w > 0 ? s->out_w : width * s->scale;
+        *out_height = s->out_h > 0 ? s->out_h : height * s->scale;
+    } else {
+        *out_width  = width;
+        *out_height = height;
+    }
+}
+
+static int nvvfx_validate_output_dims(AVFilterContext *ctx, const NVVFXContext *s,
+                                      int width, int height,
+                                      int out_width, int out_height)
+{
+    if (width <= 0 || height <= 0 || out_width <= 0 || out_height <= 0) {
+        av_log(ctx, AV_LOG_ERROR, "nvvfx: invalid output size %dx%d for a "
+               "%dx%d input.\n", out_width, out_height, width, height);
+        return AVERROR(EINVAL);
+    }
+
+    if (s->mode == MODE_SUPERRES) {
+        if (out_width < width || out_height < height) {
+            av_log(ctx, AV_LOG_ERROR, "nvvfx: VideoSuperRes only upscales, but "
+                   "%dx%d was requested for a %dx%d input.\n",
+                   out_width, out_height, width, height);
+            return AVERROR(EINVAL);
+        }
+        if (out_width > NVVFX_MAX_DIM || out_height > NVVFX_MAX_DIM) {
+            av_log(ctx, AV_LOG_ERROR, "nvvfx: output size %dx%d exceeds the "
+                   "D3D11 limit of %d.\n", out_width, out_height, NVVFX_MAX_DIM);
+            return AVERROR(EINVAL);
+        }
+    } else if (out_width != width || out_height != height) {
+        av_log(ctx, AV_LOG_ERROR, "nvvfx: mode %d keeps the input dimensions, "
+               "but %dx%d was requested for a %dx%d input.\n", s->mode,
+               out_width, out_height, width, height);
+        return AVERROR(EINVAL);
+    }
+
+    return 0;
+}
+
+/* config_props runs before the first frame, so a frame's color_trc is not
+ * available yet. Use the link-level HDR hints the buffer source negotiated:
+ * BT.2020 (HDR10's matrix) or static HDR metadata cloned from the stream. */
+static int nvvfx_link_is_hdr(const AVFilterLink *link)
+{
+    int i;
+
+    if (link->colorspace == AVCOL_SPC_BT2020_NCL ||
+        link->colorspace == AVCOL_SPC_BT2020_CL)
+        return 1;
+
+    for (i = 0; i < link->nb_side_data; i++) {
+        if (link->side_data[i]->type == AV_FRAME_DATA_MASTERING_DISPLAY_METADATA ||
+            link->side_data[i]->type == AV_FRAME_DATA_CONTENT_LIGHT_LEVEL)
+            return 1;
+    }
+
+    return 0;
 }
 
 /* One fullscreen triangle vertex shader with SV_VertexID and one pixel shader
@@ -916,7 +1018,7 @@ static int vp_create(AVFilterContext *ctx, NVVFXContext *s, int width, int heigh
     return 0;
 }
 
-static void vp_set_stream_colorspace(NVVFXContext *s, const AVFrame *frame)
+static void vp_set_stream_colorspace(NVVFXContext *s, const AVFrame *frame, int hdr)
 {
     int matrix_601;
 
@@ -929,6 +1031,20 @@ static void vp_set_stream_colorspace(NVVFXContext *s, const AVFrame *frame)
         };
         s->video_context->lpVtbl->VideoProcessorSetStreamColorSpace(s->video_context,
                                                                     s->vp, 0, &csp);
+        return;
+    }
+
+    if (hdr && s->video_context1) {
+        /* PQ/BT.2020 input. The legacy D3D11_VIDEO_PROCESSOR_COLOR_SPACE
+         * cannot express ST 2084, so use the ID3D11VideoContext1 API: the
+         * matrix/range conversion keeps the PQ code values (both sides use
+         * the same transfer function). Do not fall back to BT.709 here. */
+        s->video_context1->lpVtbl->VideoProcessorSetStreamColorSpace1(
+            s->video_context1, s->vp, 0,
+            DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020);
+        s->video_context1->lpVtbl->VideoProcessorSetOutputColorSpace1(
+            s->video_context1, s->vp,
+            DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
         return;
     }
 
@@ -968,6 +1084,8 @@ static int vfx_setup(AVFilterContext *ctx, NVVFXContext *s, int width, int heigh
 {
     int is_artifact = s->mode == MODE_ARTIFACT;
     int is_hdr = nvvfx_hdr_mode(s);
+    int hdr_out = s->hdr_out;
+    int packed_out = s->packed_out;
     int use_10bit = nvvfx_10bit_mode(s);
     int bridge_out = use_10bit || is_hdr;
     int quality_level = 0;
@@ -976,8 +1094,7 @@ static int vfx_setup(AVFilterContext *ctx, NVVFXContext *s, int width, int heigh
     int out_pf = (use_10bit || is_hdr) ? NVCV_RGB10A2 :
                  is_artifact ? NVCV_BGRA : pixfmt;
     int out_type = (use_10bit || is_hdr) ? NVCV_P32 : NVCV_U8;
-    int out_width = s->mode == MODE_SUPERRES ? width * s->scale : width;
-    int out_height = s->mode == MODE_SUPERRES ? height * s->scale : height;
+    int out_width, out_height;
     DXGI_FORMAT tex_format = vp_needed ? DXGI_FORMAT_B8G8R8A8_UNORM : in_format;
     DXGI_FORMAT out_tex_format = is_artifact ? DXGI_FORMAT_B8G8R8A8_UNORM : tex_format;
     char model_dir[NVVFX_MAX_PATH] = "";
@@ -985,6 +1102,12 @@ static int vfx_setup(AVFilterContext *ctx, NVVFXContext *s, int width, int heigh
     NvCV_Status st;
     HRESULT hr;
     int ret;
+
+    nvvfx_output_dims(s, width, height, &out_width, &out_height);
+    ret = nvvfx_validate_output_dims(ctx, s, width, height,
+                                     out_width, out_height);
+    if (ret < 0)
+        return ret;
 
     if (is_artifact) {
         if (width > 1920 || height > 1080) {
@@ -1058,7 +1181,7 @@ static int vfx_setup(AVFilterContext *ctx, NVVFXContext *s, int width, int heigh
                "bridge textures.\n");
         goto fail;
     }
-    if (use_10bit && !is_hdr &&
+    if (use_10bit && !packed_out &&
         (ret = create_texture(s, out_width, out_height, DXGI_FORMAT_P010,
                               D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET,
                               &s->out_p010_tex)) < 0) {
@@ -1225,7 +1348,7 @@ static int vfx_setup(AVFilterContext *ctx, NVVFXContext *s, int width, int heigh
         if (ret < 0)
             goto fail;
     }
-    if (use_10bit && !is_hdr) {
+    if (use_10bit && !is_hdr && !packed_out) {
         D3D11_VIDEO_PROCESSOR_COLOR_SPACE stream_csp = {
             .Usage = 0,
             .RGB_Range = 0,
@@ -1429,8 +1552,9 @@ static int vfx_setup(AVFilterContext *ctx, NVVFXContext *s, int width, int heigh
            "mode=%d, %s)\n", is_artifact ? "ArtifactReduction" :
            is_hdr ? "TrueHDR" : "VideoSuperRes", width, height,
            out_width, out_height, quality_level, s->mode,
-           use_10bit ? "10-bit RGB10A2" : is_hdr ? "RGBA8 in, RGB10A2 out" :
-           "8-bit RGBA/BGRA");
+           is_hdr ? "RGBA8 in, RGB10A2 out" :
+           hdr_out ? "10-bit RGB10A2 in/out, PQ/BT.2020" :
+           use_10bit ? "10-bit RGB10A2" : "8-bit RGBA/BGRA");
     return 0;
 
 fail:
@@ -1507,6 +1631,7 @@ static int vfx_process(AVFilterContext *ctx, NVVFXContext *s, const AVFrame *fra
                        ID3D11Texture2D *out_tex, UINT out_slice)
 {
     int is_hdr = nvvfx_hdr_mode(s);
+    int hdr_out = s->hdr_out;
     int use_10bit = nvvfx_10bit_mode(s);
     int bridge_out = use_10bit || is_hdr;
     NvCV_Status st;
@@ -1517,7 +1642,7 @@ static int vfx_process(AVFilterContext *ctx, NVVFXContext *s, const AVFrame *fra
 
     if (use_10bit) {
         if (s->vp_needed) {
-            vp_set_stream_colorspace(s, frame);
+            vp_set_stream_colorspace(s, frame, hdr_out);
             s->device_ctx->lpVtbl->CopySubresourceRegion(s->device_ctx,
                                                          (ID3D11Resource *)s->in_yuv_tex, 0,
                                                          0, 0, 0,
@@ -1565,7 +1690,7 @@ static int vfx_process(AVFilterContext *ctx, NVVFXContext *s, const AVFrame *fra
         }
     } else {
         if (s->vp_needed) {
-            vp_set_stream_colorspace(s, frame);
+            vp_set_stream_colorspace(s, frame, 0);
             s->device_ctx->lpVtbl->CopySubresourceRegion(s->device_ctx,
                                                          (ID3D11Resource *)s->in_yuv_tex, 0,
                                                          0, 0, 0,
@@ -1676,9 +1801,12 @@ static int vfx_process(AVFilterContext *ctx, NVVFXContext *s, const AVFrame *fra
         if ((ret = d3d11_sync(ctx, s)) < 0)
             return ret;
 
-        if (is_hdr) {
-            /* TrueHDR output is already packed PQ/BT.2020 RGB10A2; copy it
-             * straight into the X2BGR10 output frame (no VP color conversion). */
+        if (is_hdr || (use_10bit && s->packed_out)) {
+            /* TrueHDR, PQ VideoSuperRes and odd-sized SDR VideoSuperRes output
+             * packed RGB10A2; copy it straight into the X2BGR10 output frame
+             * (no VP color conversion to P010). The bridge pixel shader writes
+             * alpha 1.0, so the packed word's alpha bits are forced to 3
+             * (word |= 0xC0000000). */
             s->device_ctx->lpVtbl->CopySubresourceRegion(s->device_ctx,
                                                          (ID3D11Resource *)out_tex, out_slice,
                                                          0, 0, 0,
@@ -1747,6 +1875,10 @@ static int nvvfx_config_props(AVFilterLink *outlink)
 
     av_buffer_unref(&s->hw_frames_ctx_out);
     vfx_destroy(s);
+    if (s->video_context1) {
+        s->video_context1->lpVtbl->Release(s->video_context1);
+        s->video_context1 = NULL;
+    }
     if (s->video_context) {
         s->video_context->lpVtbl->Release(s->video_context);
         s->video_context = NULL;
@@ -1763,12 +1895,20 @@ static int nvvfx_config_props(AVFilterLink *outlink)
 
     in_frames = (AVHWFramesContext *)inl->hw_frames_ctx->data;
     s->in_sw_format = in_frames->sw_format;
+    s->hdr_out = 0;
+    s->packed_out = 0;
 
     if (s->mode == MODE_ARTIFACT && s->bit_depth != 8) {
         av_log(ctx, AV_LOG_ERROR, "nvvfx: bit_depth is only supported for "
                "superres/denoise/deblur and hdr.\n");
         return AVERROR(EINVAL);
     }
+
+    nvvfx_output_dims(s, inlink->w, inlink->h, &out_width, &out_height);
+    ret = nvvfx_validate_output_dims(ctx, s, inlink->w, inlink->h,
+                                     out_width, out_height);
+    if (ret < 0)
+        return ret;
 
     if (s->mode == MODE_HDR) {
         switch (s->in_sw_format) {
@@ -1793,7 +1933,31 @@ static int nvvfx_config_props(AVFilterLink *outlink)
                    av_get_pix_fmt_name(s->in_sw_format));
             return AVERROR(EINVAL);
         }
-        s->out_sw_format = AV_PIX_FMT_P010;
+        s->hdr_out = s->hdr == HDR_ON ||
+                     (s->hdr == HDR_AUTO && nvvfx_link_is_hdr(inlink));
+        /* P010 requires even dimensions. SuperRes accepts odd/tiny sizes, so
+         * fall back to packed X2BGR10 for odd SDR output (the VSR effect itself
+         * has no even-dimension constraint). */
+        s->packed_out = s->hdr_out || (out_width & 1) || (out_height & 1);
+        if (s->packed_out) {
+            /* VSR preserves the PQ code values; emit packed RGB10A2 so the
+             * graph can convert to P010 with swscale (the D3D11 VP cannot do
+             * PQ/BT.2020 -> P010 correctly). */
+            s->out_sw_format = AV_PIX_FMT_X2BGR10;
+            if (!s->hdr_out)
+                av_log(ctx, AV_LOG_VERBOSE, "nvvfx: odd output %dx%d cannot be "
+                       "represented as P010; using packed SDR X2BGR10.\n",
+                       out_width, out_height);
+        } else {
+            s->out_sw_format = AV_PIX_FMT_P010;
+        }
+        av_log(ctx, AV_LOG_VERBOSE, "nvvfx: 10-bit path: hdr=%d (link colorspace "
+               "%s, range %s, side data %d) -> %s\n", s->hdr,
+               (const char *)av_x_if_null(av_color_space_name(inlink->colorspace), "unknown"),
+               (const char *)av_x_if_null(av_color_range_name(inlink->color_range), "unknown"),
+               inlink->nb_side_data,
+               s->hdr_out ? "X2BGR10 PQ/BT.2020" :
+               s->packed_out ? "X2BGR10 SDR" : "P010 SDR");
     } else {
         switch (s->in_sw_format) {
         case AV_PIX_FMT_NV12:
@@ -1856,12 +2020,23 @@ static int nvvfx_config_props(AVFilterLink *outlink)
         }
     }
 
-    out_width = s->mode == MODE_SUPERRES ? inlink->w * s->scale : inlink->w;
-    out_height = s->mode == MODE_SUPERRES ? inlink->h * s->scale : inlink->h;
+    if (s->hdr_out && vp_needed) {
+        hr = s->device_ctx->lpVtbl->QueryInterface(s->device_ctx,
+                                                   &IID_ID3D11VideoContext1,
+                                                   (void **)&s->video_context1);
+        if (FAILED(hr)) {
+            av_log(ctx, AV_LOG_ERROR, "nvvfx: HDR VideoSuperRes requires "
+                   "ID3D11VideoContext1 for the PQ/BT.2020 conversion "
+                   "(HRESULT 0x%lX).\n", hr);
+            return AVERROR_EXTERNAL;
+        }
+    }
+
     outlink->w = out_width;
     outlink->h = out_height;
 
-    if (s->mode == MODE_HDR) {
+    if (s->mode == MODE_HDR ||
+        (nvvfx_10bit_mode(s) && s->hdr_out)) {
         ret = nvvfx_set_output_hdr10_metadata(s, outlink);
         if (ret < 0) {
             av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to set the HDR10 output "
@@ -2040,6 +2215,15 @@ static int nvvfx_filter_frame(AVFilterLink *inlink, AVFrame *in)
     pixfmt = s->in_sw_format == AV_PIX_FMT_RGBA ? NVCV_RGBA : NVCV_BGRA;
     vp_needed = nvvfx_input_needs_vp(s);
 
+    if (nvvfx_10bit_mode(s) && s->hdr == HDR_AUTO &&
+        in->color_trc == AVCOL_TRC_SMPTE2084 && !s->hdr_out) {
+        av_log(ctx, AV_LOG_ERROR, "nvvfx: the input is PQ/BT.2020 but the HDR10 "
+               "output path was not selected at configuration time (the input "
+               "link carried no HDR hint); set hdr=on.\n");
+        ret = AVERROR(EINVAL);
+        goto fail;
+    }
+
     ret = vfx_setup(ctx, s, width, height, desc.Format, pixfmt, vp_needed);
     if (ret < 0) {
         av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to set up the effect.\n");
@@ -2071,12 +2255,30 @@ static int nvvfx_filter_frame(AVFilterLink *inlink, AVFrame *in)
         goto fail;
     }
 
-    if (nvvfx_hdr_mode(s)) {
+    if (nvvfx_hdr_mode(s) || (nvvfx_10bit_mode(s) && s->hdr_out)) {
         ret = nvvfx_attach_hdr10_metadata(s, out);
         if (ret < 0) {
             av_log(ctx, AV_LOG_ERROR, "nvvfx: failed to attach HDR10 metadata.\n");
             goto fail;
         }
+        av_log(ctx, AV_LOG_VERBOSE, "nvvfx: HDR10 output %dx%d X2BGR10 "
+               "(trc=%d, pri=%d, spc=%d, range=%d, side data %d)\n",
+               s->out_width, s->out_height, out->color_trc,
+               out->color_primaries, out->colorspace, out->color_range,
+               out->nb_side_data);
+    } else if (nvvfx_10bit_mode(s) && s->packed_out) {
+        /* Odd SDR output is packed full-range RGB (P010 cannot represent odd
+         * dimensions). Keep the input's SDR transfer/primaries. */
+        out->colorspace = AVCOL_SPC_RGB;
+        out->color_range = AVCOL_RANGE_JPEG;
+        if (out->color_primaries == AVCOL_PRI_UNSPECIFIED)
+            out->color_primaries = AVCOL_PRI_BT709;
+        if (out->color_trc == AVCOL_TRC_UNSPECIFIED)
+            out->color_trc = AVCOL_TRC_BT709;
+        out->chroma_location = AVCHROMA_LOC_UNSPECIFIED;
+        av_log(ctx, AV_LOG_VERBOSE, "nvvfx: SDR 10-bit packed output %dx%d "
+               "X2BGR10 (trc=%d, pri=%d)\n", s->out_width, s->out_height,
+               out->color_trc, out->color_primaries);
     } else if (nvvfx_10bit_mode(s)) {
         /* SDR 10-bit: the video processor writes BT.709 limited-range P010. */
         out->color_range = AVCOL_RANGE_MPEG;
@@ -2112,6 +2314,10 @@ static av_cold void nvvfx_uninit(AVFilterContext *ctx)
 
     vfx_destroy(s);
 
+    if (s->video_context1) {
+        s->video_context1->lpVtbl->Release(s->video_context1);
+        s->video_context1 = NULL;
+    }
     if (s->video_context) {
         s->video_context->lpVtbl->Release(s->video_context);
         s->video_context = NULL;
@@ -2176,6 +2382,10 @@ static const AVOption nvvfx_options[] = {
       { .i64 = QUALITY_MEDIUM }, 0, 0, FLAGS, "quality" },
     { "scale", "super resolution scale factor", OFFSET(scale), AV_OPT_TYPE_INT,
       { .i64 = 2 }, 2, 4, FLAGS },
+    { "out_w", "super resolution output width (0 = width * scale)", OFFSET(out_w),
+      AV_OPT_TYPE_INT, { .i64 = 0 }, 0, NVVFX_MAX_DIM, FLAGS },
+    { "out_h", "super resolution output height (0 = height * scale)", OFFSET(out_h),
+      AV_OPT_TYPE_INT, { .i64 = 0 }, 0, NVVFX_MAX_DIM, FLAGS },
     { "strength", "super resolution strength", OFFSET(strength), AV_OPT_TYPE_FLOAT,
       { .dbl = 1.0 }, 0.0, 1.0, FLAGS },
     { "bit_depth", "input/output bit depth for VideoSuperRes", OFFSET(bit_depth),
@@ -2184,6 +2394,14 @@ static const AVOption nvvfx_options[] = {
       { .i64 = 8 }, 0, 0, FLAGS, "bit_depth" },
     { "10", "10-bit RGB10A2", 0, AV_OPT_TYPE_CONST,
       { .i64 = 10 }, 0, 0, FLAGS, "bit_depth" },
+    { "hdr", "HDR/PQ handling for 10-bit VideoSuperRes", OFFSET(hdr),
+      AV_OPT_TYPE_INT, { .i64 = HDR_AUTO }, 0, HDR_NB - 1, FLAGS, "hdr" },
+    { "auto", "detect PQ/BT.2020 from the link's HDR hints", 0, AV_OPT_TYPE_CONST,
+      { .i64 = HDR_AUTO }, 0, 0, FLAGS, "hdr" },
+    { "on", "force the PQ/BT.2020 X2BGR10 output path", 0, AV_OPT_TYPE_CONST,
+      { .i64 = HDR_ON }, 0, 0, FLAGS, "hdr" },
+    { "off", "keep the SDR P010 output path", 0, AV_OPT_TYPE_CONST,
+      { .i64 = HDR_OFF }, 0, 0, FLAGS, "hdr" },
     { "contrast", "TrueHDR contrast", OFFSET(contrast), AV_OPT_TYPE_INT,
       { .i64 = 100 }, 0, 200, FLAGS },
     { "saturation", "TrueHDR saturation", OFFSET(saturation), AV_OPT_TYPE_INT,

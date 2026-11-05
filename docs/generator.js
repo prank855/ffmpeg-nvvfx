@@ -7,6 +7,7 @@
 }(typeof self !== "undefined" ? self : this, function () {
     "use strict";
 
+    var TOOLS = ["vfx", "upscale", "denoise", "framerate"];
     var EFFECTS = ["superres", "denoise", "deblur", "artifact", "hdr"];
     var VSR_EFFECTS = ["superres", "denoise", "deblur"];
     var VSR_QUALITY = ["low", "medium", "high", "ultra"];
@@ -14,9 +15,11 @@
     var RATE_CONTROL = ["vbr", "cq", "constqp", "cbr"];
     var MULTIPASS = ["disabled", "qres", "fullres"];
     var TUNES = ["hq", "ll", "ull"];
+    var UPSCALE_RATIOS = ["4/3", "3/2", "2", "3", "4"];
 
     var defaults = {
         binary: "ffmpeg-nvvfx",
+        tool: "vfx",
         input: "input.mkv",
         output: "output.mkv",
         libDir: "",
@@ -24,6 +27,17 @@
         chain: [{ effect: "superres", quality: "ultra", scale: "2", strength: "" }],
         inputDepth: "8",
         processDepth: "8",
+        hdrVsr: false,
+        outW: "",
+        outH: "",
+        upscaleRatio: "2",
+        upscaleStrength: "0.4",
+        denoiseStrength: "0.5",
+        denoiseModelDir: "",
+        framerateMultiplier: "2",
+        framerateMode: "medium",
+        framerateEncoding: "rgb8",
+        framerateAutoShot: true,
         decode: "d3d11",
         encoder: "av1_nvenc",
         preset: "p5",
@@ -74,10 +88,15 @@
         return String(value == null ? "" : value).replace(/'/g, "'\\''");
     }
 
+    function filterPath(value) {
+        return String(value == null ? "" : value)
+            .replace(/\\/g, "/")
+            .replace(/:/g, "\\:");
+    }
+
     function normalizeChain(s) {
         var chain = Array.isArray(s.chain) ? s.chain.slice() : [];
 
-        /* Backward compatibility with the old single-mode state. */
         if (!chain.length && s.mode) {
             if (s.mode === "artifact+superres") {
                 chain = [
@@ -104,7 +123,6 @@
         if (!chain.length)
             chain = [{ effect: "superres", quality: "ultra", scale: "2", strength: "" }];
 
-        /* HDR is an output transform: keep exactly one and force it last. */
         var hdr = null;
         chain = chain.filter(function (e) {
             if (e.effect === "hdr") {
@@ -145,19 +163,23 @@
             s.inputDepth = String(legacyDepth);
             s.processDepth = String(legacyDepth);
         }
-        var chain = normalizeChain(s);
 
-        var hasArtifact = chain.some(function (e) { return isArtifact(e.effect); });
-        var hasHDR = chain.some(function (e) { return isHDR(e.effect); });
-        var vsrStages = chain.filter(function (e) { return isVSR(e.effect); });
+        var tool = TOOLS.indexOf(s.tool) >= 0 ? s.tool : "vfx";
         var inputDepth = String(s.inputDepth) === "10" ? "10" : "8";
         var processDepth = String(s.processDepth) === "10" ? "10" : "8";
-        var tenBit = processDepth === "10" && vsrStages.length > 0 && !hasArtifact;
+        var chain = normalizeChain(s);
+        var hasArtifact = chain.some(function (e) { return isArtifact(e.effect); });
+        var hasHdrEffect = chain.some(function (e) { return isHDR(e.effect); });
+        var vsrStages = chain.filter(function (e) { return isVSR(e.effect); });
+        var superresStages = chain.filter(function (e) { return e.effect === "superres"; });
+        var tenBit = tool === "vfx" && processDepth === "10" &&
+                     vsrStages.length > 0 && !hasArtifact;
+        var hdrVsr = tool === "vfx" && s.hdrVsr && tenBit &&
+                     !hasHdrEffect && superresStages.length > 0;
+        var hasHDR = tool === "vfx" && (hasHdrEffect || hdrVsr);
         var promote = tenBit && inputDepth === "8";
-
-        var encoder = s.encoder || "av1_nvenc";
-        if ((hasHDR || tenBit) && encoder === "h264_nvenc")
-            encoder = "hevc_nvenc";
+        var frTen = tool === "framerate" && s.framerateEncoding === "rgb10a2";
+        var force10 = hasHDR || tenBit || frTen;
 
         var rc = RATE_CONTROL.indexOf(s.rc) >= 0 ? s.rc : "vbr";
         var multipass = MULTIPASS.indexOf(s.multipass) >= 0 ? s.multipass : "qres";
@@ -168,41 +190,91 @@
         var bf = clampInt(s.bf, 0, 4, 4);
         var gop = clampInt(s.gop, 0, 2000, 240);
         var kbps = bitrateKbps(s.bitrate);
+        var encoder = s.encoder || "av1_nvenc";
+
+        if (force10 && encoder === "h264_nvenc")
+            encoder = "hevc_nvenc";
 
         var filters = [];
+
         if (s.decode === "nvdec") {
-            var nvdecTen = tenBit && inputDepth === "10";
-            var hdrTen = hasHDR && !vsrStages.length && inputDepth === "10";
-            filters.push(nvdecTen || hdrTen ? "format=p010,hwupload"
-                                           : "format=nv12,hwupload");
-            if (promote)
+            if (tool === "vfx") {
+                filters.push(tenBit && inputDepth === "10" ? "format=p010,hwupload"
+                                                           : "format=nv12,hwupload");
+                if (promote)
+                    filters.push("scale_d3d11=format=p010");
+            } else if (tool === "framerate") {
+                filters.push(frTen && inputDepth === "10" ? "format=p010,hwupload"
+                                                          : "format=nv12,hwupload");
+                if (frTen && inputDepth === "8")
+                    filters.push("scale_d3d11=format=p010");
+            } else {
+                filters.push("format=nv12,hwupload");
+            }
+        } else {
+            if (tool === "vfx" && promote)
                 filters.push("scale_d3d11=format=p010");
-        } else if (promote) {
-            filters.push("scale_d3d11=format=p010");
+            if (tool === "framerate" && frTen && inputDepth === "8")
+                filters.push("scale_d3d11=format=p010");
         }
 
-        chain.forEach(function (e) {
-            var f = "nvvfx=mode=" + e.effect;
-            if (isVSR(e.effect)) {
-                f += ":quality=" + e.quality;
-                if (e.effect === "superres")
-                    f += ":scale=" + e.scale;
-                if (tenBit)
-                    f += ":bit_depth=10";
-                if (e.strength !== "")
-                    f += ":strength=" + e.strength;
-            } else if (isArtifact(e.effect)) {
-                f += ":quality=" + e.quality;
-            }
-            filters.push(f);
-        });
+        if (tool === "vfx") {
+            var outW = parseInt(s.outW, 10);
+            var outH = parseInt(s.outH, 10);
+            var useOut = outW > 0 && outH > 0 && superresStages.length > 0;
 
-        if (hasHDR) {
-            filters.push("hwdownload,format=x2bgr10le," +
-                         "scale=in_range=full:out_color_matrix=bt2020nc:out_range=tv," +
-                         "format=p010le");
-        } else if (!tenBit) {
+            chain.forEach(function (e) {
+                var f = "nvvfx=mode=" + e.effect;
+                if (isVSR(e.effect)) {
+                    f += ":quality=" + e.quality;
+                    if (e.effect === "superres")
+                        f += ":scale=" + e.scale;
+                    if (tenBit)
+                        f += ":bit_depth=10";
+                    if (hdrVsr && e.effect === "superres")
+                        f += ":hdr=on";
+                    if (useOut && e.effect === "superres" &&
+                        e === superresStages[superresStages.length - 1])
+                        f += ":out_w=" + outW + ":out_h=" + outH;
+                    if (e.strength !== "")
+                        f += ":strength=" + e.strength;
+                } else if (isArtifact(e.effect)) {
+                    f += ":quality=" + e.quality;
+                }
+                filters.push(f);
+            });
+
+            if (hasHDR) {
+                filters.push("hwdownload,format=x2bgr10le," +
+                             "scale=in_range=full:out_color_matrix=bt2020nc:out_range=tv," +
+                             "format=p010le");
+            } else if (!tenBit) {
+                filters.push("scale_d3d11=format=nv12");
+            }
+        } else if (tool === "upscale") {
+            var ratio = UPSCALE_RATIOS.indexOf(String(s.upscaleRatio)) >= 0
+                        ? String(s.upscaleRatio) : "2";
+            filters.push("nvvfx_upscale=ratio=" + ratio +
+                         ":strength=" + (s.upscaleStrength || "0.4"));
             filters.push("scale_d3d11=format=nv12");
+        } else if (tool === "denoise") {
+            var df = "nvvfx_denoise=strength=" + (s.denoiseStrength || "0.5");
+            if (s.denoiseModelDir)
+                df += ":model_dir=" + filterPath(s.denoiseModelDir);
+            filters.push(df);
+            filters.push("scale_d3d11=format=nv12");
+        } else {
+            var frMode = ["low", "medium", "high"].indexOf(s.framerateMode) >= 0
+                         ? s.framerateMode : "medium";
+            var frEnc = frTen ? "rgb10a2" : "rgb8";
+            var fr = "nvvfx_framerate=multiplier=" +
+                     clampInt(s.framerateMultiplier, 2, 8, 2) +
+                     ":mode=" + frMode + ":encoding=" + frEnc;
+            if (!s.framerateAutoShot)
+                fr += ":auto_shot_change=0";
+            filters.push(fr);
+            if (!frTen)
+                filters.push("scale_d3d11=format=nv12");
         }
 
         var vfString = filters.join(",");
@@ -242,7 +314,7 @@
             if (encoder === "hevc_nvenc")
                 parts.push("-profile:v", "main10");
             parts.push("-pix_fmt", "p010le");
-        } else if (tenBit && encoder === "hevc_nvenc") {
+        } else if ((tenBit || frTen) && encoder === "hevc_nvenc") {
             parts.push("-profile:v", "main10");
         }
 
@@ -301,6 +373,7 @@
 
     return {
         defaults: defaults,
+        tools: TOOLS,
         effects: EFFECTS,
         vsrEffects: VSR_EFFECTS,
         vsrQuality: VSR_QUALITY,
@@ -308,6 +381,7 @@
         rateControl: RATE_CONTROL,
         multipass: MULTIPASS,
         tunes: TUNES,
+        upscaleRatios: UPSCALE_RATIOS,
         bitrateKbps: bitrateKbps,
         normalizeChain: normalizeChain,
         buildCommand: buildCommand

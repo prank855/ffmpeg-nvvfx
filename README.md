@@ -16,7 +16,14 @@ on D3D11 frames.
 | `artifact` | Remove compression artifacts | same size (max 1080p) |
 | `hdr` | SDR → HDR10 | same size, RGB10A2 |
 
-Plus the two-input `nvvfx_framegen` filter for frame interpolation.
+Additional filters:
+
+| Filter | What it does |
+|---|---|
+| `nvvfx_upscale` | fast 8-bit upscale (4/3, 3/2, 2x, 3x, 4x) |
+| `nvvfx_denoise` | TensorRT video denoise (8-bit) |
+| `nvvfx_framerate` | automatic 2x–8x frame-rate conversion |
+| `nvvfx_framegen` | two-input manual frame interpolation |
 
 The release binaries are `ffmpeg-nvvfx.exe` and `ffprobe-nvvfx.exe`. A source
 build still produces `ffmpeg.exe`/`ffprobe.exe`; copy or rename them if you
@@ -77,6 +84,15 @@ This upconverts; use `bit_depth=10` above for a true 10-bit pipeline.
 **8-bit source, 10-bit pipeline:** insert `scale_d3d11=format=p010` before
 `nvvfx` (the command builder does this for you).
 
+**Arbitrary VSR output:** add `:out_w=800:out_h=450` (or any upscale size).
+Downscaling is rejected.
+
+**HDR/PQ VSR:** use `bit_depth=10:hdr=on`, then convert the X2BGR10 output:
+
+```text
+nvvfx=mode=superres:quality=ultra:scale=2:bit_depth=10:hdr=on,hwdownload,format=x2bgr10le,scale=in_range=full:out_color_matrix=bt2020nc:out_range=tv,format=p010le
+```
+
 **SDR → HDR10:**
 
 ```bash
@@ -98,6 +114,26 @@ ffmpeg-nvvfx -init_hw_device d3d11va=dev -filter_hw_device dev \
 
 Use `method=index:frame_multiplier=4:frame_index=2` for index mode.
 `nvvfx_framegen` outputs BGRA; append `,scale_d3d11=format=nv12` for NVENC.
+
+**Fast upscale (`nvvfx_upscale`, 8-bit):**
+
+```text
+nvvfx_upscale=ratio=3/2:strength=0.5,scale_d3d11=format=nv12
+```
+
+**TRT denoise (`nvvfx_denoise`, 8-bit):**
+
+```text
+nvvfx_denoise=strength=0.5,scale_d3d11=format=nv12
+```
+
+**Automatic frame rate (`nvvfx_framerate`):**
+
+```text
+nvvfx_framerate=multiplier=2:mode=medium:encoding=rgb10a2
+```
+
+For `encoding=rgb8`, append `,scale_d3d11=format=nv12`.
 
 **Other effects:**
 
@@ -132,7 +168,11 @@ For `artifact`: `conservative` or `aggressive`.
 - `mode=hdr` outputs RGB10A2 PQ/BT.2020 (`x2bgr10le`). Always use the `scale`
   chain above to make P010 HDR10; the D3D11 video processor does not do the
   PQ/BT.2020 conversion correctly on current drivers.
-- `nvvfx_framegen` is RGB8-only for now.
+- `nvvfx_upscale` and `nvvfx_denoise` are 8-bit only; P010 input is
+  downconverted. `nvvfx_denoise` needs the SDK 1.3 Denoise models under
+  `<runtime>\models` or `model_dir=`.
+- `nvvfx_framerate` supports RGB8 and RGB10A2; 10-bit requires P010/X2BGR10.
+- `nvvfx_framegen` supports RGB8 and RGB10A2.
 - `artifact` is limited to 1920x1080.
 - Don't run `artifact` and `denoise` in the same process.
 - `-hwaccel d3d11va -hwaccel_output_format d3d11` is the zero-copy decode path.

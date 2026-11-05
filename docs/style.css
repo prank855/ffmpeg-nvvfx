@@ -292,3 +292,14 @@ select:disabled {
   .effect-row { grid-template-columns: 1fr; }
   .effect-buttons { justify-content: flex-end; }
 }
+
+.inline { display: flex; gap: 8px; }
+.inline input { width: 100%; }
+.checkline {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+  color: var(--muted);
+}
+.checkline input { accent-color: var(--accent); }

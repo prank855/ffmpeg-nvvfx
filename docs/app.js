@@ -10,7 +10,7 @@
 
     var EFFECT_LABELS = {
         superres: "Super resolution",
-        denoise: "Denoise",
+        denoise: "Denoise (VSR)",
         deblur: "Deblur",
         artifact: "Artifact reduction",
         hdr: "SDR → HDR10"
@@ -18,26 +18,32 @@
 
     var PRESETS = {
         "8bit": {
+            tool: "vfx",
             chain: [{ effect: "superres", quality: "ultra", scale: "2", strength: "" }],
             inputDepth: "8", processDepth: "8", encoder: "av1_nvenc", decode: "d3d11"
         },
         "10bit": {
+            tool: "vfx",
             chain: [{ effect: "superres", quality: "ultra", scale: "2", strength: "" }],
             inputDepth: "10", processDepth: "10", encoder: "av1_nvenc", decode: "d3d11"
         },
         "8to10": {
+            tool: "vfx",
             chain: [{ effect: "superres", quality: "ultra", scale: "2", strength: "" }],
             inputDepth: "8", processDepth: "10", encoder: "av1_nvenc", decode: "d3d11"
         },
         "denoise": {
+            tool: "vfx",
             chain: [{ effect: "denoise", quality: "high", scale: "2", strength: "" }],
             inputDepth: "8", processDepth: "8", encoder: "av1_nvenc", decode: "d3d11"
         },
         "artifact": {
+            tool: "vfx",
             chain: [{ effect: "artifact", quality: "conservative", scale: "2", strength: "" }],
             inputDepth: "8", processDepth: "8", encoder: "av1_nvenc", decode: "d3d11"
         },
         "chain": {
+            tool: "vfx",
             chain: [
                 { effect: "artifact", quality: "conservative", scale: "2", strength: "" },
                 { effect: "superres", quality: "ultra", scale: "2", strength: "" }
@@ -45,8 +51,22 @@
             inputDepth: "8", processDepth: "8", encoder: "av1_nvenc", decode: "d3d11"
         },
         "hdr": {
+            tool: "vfx",
             chain: [{ effect: "hdr", quality: "high", scale: "2", strength: "" }],
             inputDepth: "8", processDepth: "10", encoder: "hevc_nvenc", decode: "d3d11"
+        },
+        "fastupscale": {
+            tool: "upscale", upscaleRatio: "2", upscaleStrength: "0.4",
+            encoder: "av1_nvenc", decode: "d3d11"
+        },
+        "trtdenoise": {
+            tool: "denoise", denoiseStrength: "0.5",
+            encoder: "av1_nvenc", decode: "d3d11"
+        },
+        "rate": {
+            tool: "framerate", framerateMultiplier: "2", framerateMode: "medium",
+            framerateEncoding: "rgb8", inputDepth: "8",
+            encoder: "av1_nvenc", decode: "d3d11"
         }
     };
 
@@ -229,6 +249,7 @@
 
     function readState() {
         return {
+            tool: value("tool"),
             input: value("input"),
             output: value("output"),
             libDir: value("libDir"),
@@ -236,6 +257,17 @@
             chain: readChain(),
             inputDepth: value("inputDepth"),
             processDepth: value("processDepth"),
+            hdrVsr: checked("hdrVsr"),
+            outW: value("outW"),
+            outH: value("outH"),
+            upscaleRatio: value("upscaleRatio"),
+            upscaleStrength: value("upscaleStrength"),
+            denoiseStrength: value("denoiseStrength"),
+            denoiseModelDir: value("denoiseModelDir"),
+            framerateMultiplier: value("framerateMultiplier"),
+            framerateMode: value("framerateMode"),
+            framerateEncoding: value("framerateEncoding"),
+            framerateAutoShot: checked("framerateAutoShot"),
             decode: value("decode"),
             encoder: value("encoder"),
             preset: value("preset"),
@@ -258,6 +290,12 @@
         };
     }
 
+    function show(name, on) {
+        document.querySelectorAll("[data-show='" + name + "']").forEach(function (el) {
+            el.classList.toggle("is-hidden", !on);
+        });
+    }
+
     function update() {
         var rc = value("rc");
         if (rc !== lastRc) {
@@ -265,17 +303,42 @@
             lastRc = rc;
             applyRcField(rc);
         }
+
+        var tool = value("tool");
         var chain = readChain();
-        var hasHDR = chain.some(function (e) { return e.effect === "hdr"; });
+        var hasHdrEffect = chain.some(function (e) { return e.effect === "hdr"; });
         var hasArtifact = chain.some(function (e) { return e.effect === "artifact"; });
         var hasDenoise = chain.some(function (e) { return e.effect === "denoise"; });
         var vsrStages = chain.filter(function (e) {
             return G.vsrEffects.indexOf(e.effect) >= 0;
         });
+        var superresStages = chain.filter(function (e) { return e.effect === "superres"; });
         var inputDepth = value("inputDepth");
         var processDepth = value("processDepth");
-        var force10 = hasHDR ||
-            (processDepth === "10" && vsrStages.length > 0 && !hasArtifact);
+        var frTen = tool === "framerate" && value("framerateEncoding") === "rgb10a2";
+
+        $("vfxSection").classList.toggle("is-hidden", tool !== "vfx");
+        $("upscaleSection").classList.toggle("is-hidden", tool !== "upscale");
+        $("denoiseSection").classList.toggle("is-hidden", tool !== "denoise");
+        $("framerateSection").classList.toggle("is-hidden", tool !== "framerate");
+        show("indepth", tool === "vfx" || tool === "framerate");
+
+        var hdrBox = $("hdrVsr");
+        var hdrAllowed = tool === "vfx" && processDepth === "10" &&
+                         inputDepth === "10" && superresStages.length > 0 &&
+                         !hasArtifact && !hasHdrEffect;
+        if (!hdrAllowed)
+            hdrBox.checked = false;
+        show("hdrvsr", hdrAllowed);
+        var hdrVsr = hdrAllowed && hdrBox.checked;
+
+        show("depth", tool === "vfx" && vsrStages.length > 0);
+        show("outdims", tool === "vfx" && superresStages.length > 0);
+
+        var tenBit = tool === "vfx" && processDepth === "10" &&
+                     vsrStages.length > 0 && !hasArtifact;
+        var hasHDR = tool === "vfx" && (hasHdrEffect || hdrVsr);
+        var force10 = hasHDR || tenBit || frTen;
 
         var enc = $("encoder");
         var h264 = enc.querySelector("option[value='h264_nvenc']");
@@ -283,27 +346,35 @@
         if (force10 && enc.value === "h264_nvenc")
             enc.value = "hevc_nvenc";
 
-        document.querySelectorAll("[data-show='depth']").forEach(function (el) {
-            el.classList.toggle("is-hidden", vsrStages.length === 0);
-        });
-
         var notes = [];
-        if (hasHDR)
-            notes.push("HDR output is X2BGR10; the chain converts it to P010 HDR10. Use HEVC or AV1.");
-        if (processDepth === "10" && vsrStages.length && !hasArtifact) {
-            if (inputDepth === "8")
-                notes.push("8-bit source will be promoted to P010 before 10-bit VSR. Output is 10-bit; source detail stays 8-bit.");
-            else
-                notes.push("True 10-bit input → RGB10A2 VSR → P010.");
-        } else if (processDepth === "8" && inputDepth === "10") {
-            notes.push("10-bit input will be downconverted for 8-bit processing.");
+        if (tool === "vfx") {
+            if (hdrVsr)
+                notes.push("VSR preserves PQ/BT.2020; output is X2BGR10 with HDR10 tags. Convert with swscale before encoding.");
+            if (hasHdrEffect)
+                notes.push("HDR output is X2BGR10; the chain converts it to P010 HDR10. Use HEVC or AV1.");
+            if (tenBit && !hasArtifact) {
+                if (inputDepth === "8")
+                    notes.push("8-bit source will be promoted to P010 before 10-bit VSR. Output is 10-bit; source detail stays 8-bit.");
+                else
+                    notes.push("True 10-bit input → RGB10A2 VSR → P010.");
+            } else if (processDepth === "8" && inputDepth === "10") {
+                notes.push("10-bit input will be downconverted for 8-bit processing.");
+            }
+            if (hasArtifact && processDepth === "10")
+                notes.push("Artifact reduction is 8-bit, so 10-bit processing is disabled for this chain.");
+            if (hasArtifact && hasDenoise)
+                notes.push("Artifact + denoise in one chain is not recommended.");
+            if (chain.length > 1)
+                notes.push("Chain order is preserved; HDR is forced last.");
+            if (value("outW") || value("outH"))
+                notes.push("Output W/H apply to the last superres stage; downscaling is rejected.");
+        } else if (tool === "upscale") {
+            notes.push("Fast upscale is 8-bit only. Ratios 4/3, 3/2, 2, 3, 4; 2.5x and 1x are rejected.");
+        } else if (tool === "denoise") {
+            notes.push("TRT denoise is 8-bit only; P010 is downconverted. It needs the SDK 1.3 Denoise models (models folder under the runtime libs).");
+        } else {
+            notes.push("Frame-rate conversion emits multiplier × frames. RGB10A2 needs 10-bit input; 8-bit is promoted to P010.");
         }
-        if (hasArtifact && processDepth === "10")
-            notes.push("Artifact reduction is 8-bit, so 10-bit processing is disabled for this chain.");
-        if (hasArtifact && hasDenoise)
-            notes.push("Artifact + denoise in one chain is not recommended.");
-        if (chain.length > 1)
-            notes.push("Chain order is preserved; HDR is forced last.");
         if (value("decode") === "nvdec")
             notes.push("NVDEC path is not zero-copy.");
         noteEl.textContent = notes.join(" ");
@@ -317,8 +388,11 @@
         var p = PRESETS[name];
         if (!p)
             return;
-        renderChain(p.chain);
-        ["inputDepth", "processDepth", "encoder", "decode"].forEach(function (id) {
+        if (p.chain)
+            renderChain(p.chain);
+        ["tool", "inputDepth", "processDepth", "encoder", "decode",
+         "upscaleRatio", "upscaleStrength", "denoiseStrength",
+         "framerateMultiplier", "framerateMode", "framerateEncoding"].forEach(function (id) {
             if (p[id] != null)
                 $(id).value = p[id];
         });
