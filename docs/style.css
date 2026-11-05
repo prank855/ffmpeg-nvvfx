@@ -59,6 +59,30 @@ h1 {
 .links a { color: #8fc2ff; text-decoration: none; font-weight: 600; }
 .links a:hover { text-decoration: underline; }
 
+.feature-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 18px;
+}
+
+.feature-strip span {
+  border: 1px solid #34404f;
+  border-radius: 999px;
+  padding: 4px 10px;
+  color: #c8d5e5;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.feature-strip .feature-version {
+  background: #1f6feb;
+  border-color: #1f6feb;
+  color: #fff;
+  font-weight: 700;
+}
+
 .layout {
   display: grid;
   grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);

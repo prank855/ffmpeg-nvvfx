@@ -7,7 +7,7 @@
 }(typeof self !== "undefined" ? self : this, function () {
     "use strict";
 
-    var TOOLS = ["vfx", "upscale", "denoise", "framerate"];
+    var TOOLS = ["vfx", "upscale", "denoise", "framerate", "framegen"];
     var EFFECTS = ["superres", "denoise", "deblur", "artifact", "hdr"];
     var VSR_EFFECTS = ["superres", "denoise", "deblur"];
     var VSR_QUALITY = ["low", "medium", "high", "ultra"];
@@ -21,6 +21,7 @@
         binary: "ffmpeg-nvvfx",
         tool: "vfx",
         input: "input.mkv",
+        inputB: "input2.mkv",
         output: "output.mkv",
         libDir: "",
         shell: "bash",
@@ -38,6 +39,13 @@
         framerateMode: "medium",
         framerateEncoding: "rgb8",
         framerateAutoShot: true,
+        framegenMode: "medium",
+        framegenMethod: "time",
+        framegenTimestep: "0.5",
+        framegenMultiplier: "2",
+        framegenFrameIndex: "1",
+        framegenEncoding: "rgb8",
+        framegenAutoShot: true,
         decode: "d3d11",
         encoder: "av1_nvenc",
         preset: "p5",
@@ -65,6 +73,13 @@
 
     function clampInt(value, min, max, fallback) {
         var n = parseInt(String(value), 10);
+        if (!isFinite(n))
+            n = fallback;
+        return Math.min(max, Math.max(min, n));
+    }
+
+    function clampFloat(value, min, max, fallback) {
+        var n = parseFloat(String(value));
         if (!isFinite(n))
             n = fallback;
         return Math.min(max, Math.max(min, n));
@@ -179,7 +194,8 @@
         var hasHDR = tool === "vfx" && (hasHdrEffect || hdrVsr);
         var promote = tenBit && inputDepth === "8";
         var frTen = tool === "framerate" && s.framerateEncoding === "rgb10a2";
-        var force10 = hasHDR || tenBit || frTen;
+        var fgTen = tool === "framegen" && s.framegenEncoding === "rgb10a2";
+        var force10 = hasHDR || tenBit || frTen || fgTen;
 
         var rc = RATE_CONTROL.indexOf(s.rc) >= 0 ? s.rc : "vbr";
         var multipass = MULTIPASS.indexOf(s.multipass) >= 0 ? s.multipass : "qres";
@@ -197,7 +213,9 @@
 
         var filters = [];
 
-        if (s.decode === "nvdec") {
+        if (tool === "framegen") {
+            /* The two-input graph is assembled below. */
+        } else if (s.decode === "nvdec") {
             if (tool === "vfx") {
                 filters.push(tenBit && inputDepth === "10" ? "format=p010,hwupload"
                                                            : "format=nv12,hwupload");
@@ -263,6 +281,24 @@
                 df += ":model_dir=" + filterPath(s.denoiseModelDir);
             filters.push(df);
             filters.push("scale_d3d11=format=nv12");
+        } else if (tool === "framegen") {
+            var fgMode = ["low", "medium", "high"].indexOf(s.framegenMode) >= 0
+                         ? s.framegenMode : "medium";
+            var fg = "nvvfx_framegen=mode=" + fgMode;
+            if (s.framegenMethod === "index") {
+                var fgMult = clampInt(s.framegenMultiplier, 2, 8, 2);
+                fg += ":method=index:frame_multiplier=" + fgMult +
+                      ":frame_index=" + clampInt(s.framegenFrameIndex, 1, fgMult - 1, 1);
+            } else {
+                fg += ":method=time:timestep=" +
+                      clampFloat(s.framegenTimestep, 0.01, 0.99, 0.5).toFixed(2);
+            }
+            fg += ":encoding=" + (fgTen ? "rgb10a2" : "rgb8");
+            if (!s.framegenAutoShot)
+                fg += ":auto_shot_change=0";
+            filters.push(fg);
+            if (!fgTen)
+                filters.push("scale_d3d11=format=nv12");
         } else {
             var frMode = ["low", "medium", "high"].indexOf(s.framerateMode) >= 0
                          ? s.framerateMode : "medium";
@@ -291,15 +327,50 @@
         if (s.overwrite)
             parts.push("-y");
 
-        if (s.decode === "nvdec") {
-            parts.push("-hwaccel", "cuda");
+        if (tool === "framegen") {
+            var fgInputs = [
+                s.input || "input.mkv",
+                s.inputB || "input2.mkv"
+            ];
+            fgInputs.forEach(function (path) {
+                if (s.decode === "nvdec") {
+                    parts.push("-hwaccel", "cuda");
+                } else {
+                    parts.push("-hwaccel", "d3d11va",
+                               "-hwaccel_output_format", "d3d11");
+                }
+                parts.push("-i", quotePath(path));
+            });
+            if (s.decode === "nvdec") {
+                var upload = fgTen ? "format=p010,hwupload" : "format=nv12,hwupload";
+                parts.push("-filter_complex",
+                           '"[0:v]' + upload + '[a];[1:v]' + upload + '[b];' +
+                           '[a][b]' + vfString + '[v]"');
+            } else {
+                var promoteFg = fgTen && inputDepth === "8"
+                                ? "scale_d3d11=format=p010" : "";
+                if (promoteFg) {
+                    parts.push("-filter_complex",
+                               '"[0:v]' + promoteFg + '[a];[1:v]' + promoteFg + '[b];' +
+                               '[a][b]' + vfString + '[v]"');
+                } else {
+                    parts.push("-filter_complex",
+                               '"[0:v][1:v]' + vfString + '[v]"');
+                }
+            }
+            parts.push("-map", '"[v]"');
         } else {
-            parts.push("-hwaccel", "d3d11va",
-                       "-hwaccel_output_format", "d3d11");
-        }
+            if (s.decode === "nvdec") {
+                parts.push("-hwaccel", "cuda");
+            } else {
+                parts.push("-hwaccel", "d3d11va",
+                           "-hwaccel_output_format", "d3d11");
+            }
 
-        parts.push("-i", quotePath(s.input || "input.mkv"));
-        parts.push("-map", "0:v:0");
+            parts.push("-i", quotePath(s.input || "input.mkv"));
+            parts.push("-map", "0:v:0");
+            parts.push("-vf", '"' + vfString + '"');
+        }
         if (s.copyAudio)
             parts.push("-map", "0:a?");
         if (s.copySubs)
@@ -307,14 +378,13 @@
         if (s.copyAttachments)
             parts.push("-map", "0:t?");
 
-        parts.push("-vf", '"' + vfString + '"');
         parts.push("-c:v", encoder);
 
         if (hasHDR) {
             if (encoder === "hevc_nvenc")
                 parts.push("-profile:v", "main10");
             parts.push("-pix_fmt", "p010le");
-        } else if ((tenBit || frTen) && encoder === "hevc_nvenc") {
+        } else if ((tenBit || frTen || fgTen) && encoder === "hevc_nvenc") {
             parts.push("-profile:v", "main10");
         }
 

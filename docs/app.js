@@ -67,6 +67,11 @@
             tool: "framerate", framerateMultiplier: "2", framerateMode: "medium",
             framerateEncoding: "rgb8", inputDepth: "8",
             encoder: "av1_nvenc", decode: "d3d11"
+        },
+        "framegen": {
+            tool: "framegen", framegenMode: "medium", framegenMethod: "time",
+            framegenTimestep: "0.50", framegenEncoding: "rgb8", inputDepth: "8",
+            encoder: "av1_nvenc", decode: "d3d11"
         }
     };
 
@@ -251,6 +256,7 @@
         return {
             tool: value("tool"),
             input: value("input"),
+            inputB: value("framegenInputB"),
             output: value("output"),
             libDir: value("libDir"),
             shell: value("shell"),
@@ -268,6 +274,13 @@
             framerateMode: value("framerateMode"),
             framerateEncoding: value("framerateEncoding"),
             framerateAutoShot: checked("framerateAutoShot"),
+            framegenMode: value("framegenMode"),
+            framegenMethod: value("framegenMethod"),
+            framegenTimestep: value("framegenTimestep"),
+            framegenMultiplier: value("framegenMultiplier"),
+            framegenFrameIndex: value("framegenFrameIndex"),
+            framegenEncoding: value("framegenEncoding"),
+            framegenAutoShot: checked("framegenAutoShot"),
             decode: value("decode"),
             encoder: value("encoder"),
             preset: value("preset"),
@@ -316,12 +329,17 @@
         var inputDepth = value("inputDepth");
         var processDepth = value("processDepth");
         var frTen = tool === "framerate" && value("framerateEncoding") === "rgb10a2";
+        var fgTen = tool === "framegen" && value("framegenEncoding") === "rgb10a2";
 
         $("vfxSection").classList.toggle("is-hidden", tool !== "vfx");
         $("upscaleSection").classList.toggle("is-hidden", tool !== "upscale");
         $("denoiseSection").classList.toggle("is-hidden", tool !== "denoise");
         $("framerateSection").classList.toggle("is-hidden", tool !== "framerate");
-        show("indepth", tool === "vfx" || tool === "framerate");
+        $("framegenSection").classList.toggle("is-hidden", tool !== "framegen");
+        $("inputLabel").textContent = tool === "framegen" ? "Previous input" : "Input";
+        show("indepth", tool === "vfx" || tool === "framerate" || tool === "framegen");
+        show("fgtime", tool === "framegen" && value("framegenMethod") === "time");
+        show("fgindex", tool === "framegen" && value("framegenMethod") === "index");
 
         var hdrBox = $("hdrVsr");
         var hdrAllowed = tool === "vfx" && processDepth === "10" &&
@@ -338,7 +356,7 @@
         var tenBit = tool === "vfx" && processDepth === "10" &&
                      vsrStages.length > 0 && !hasArtifact;
         var hasHDR = tool === "vfx" && (hasHdrEffect || hdrVsr);
-        var force10 = hasHDR || tenBit || frTen;
+        var force10 = hasHDR || tenBit || frTen || fgTen;
 
         var enc = $("encoder");
         var h264 = enc.querySelector("option[value='h264_nvenc']");
@@ -372,6 +390,10 @@
             notes.push("Fast upscale is 8-bit only. Ratios 4/3, 3/2, 2, 3, 4; 2.5x and 1x are rejected.");
         } else if (tool === "denoise") {
             notes.push("TRT denoise is 8-bit only; P010 is downconverted. It needs the SDK 1.3 Denoise models (models folder under the runtime libs).");
+        } else if (tool === "framegen") {
+            notes.push("Frame generation takes two independent, same-size inputs and writes one intermediate frame per pair. Align their timestamps before pairing.");
+            if (fgTen)
+                notes.push("RGB10A2 output is P010; 8-bit input is promoted on both paths.");
         } else {
             notes.push("Frame-rate conversion emits multiplier × frames. RGB10A2 needs 10-bit input; 8-bit is promoted to P010.");
         }
@@ -392,7 +414,9 @@
             renderChain(p.chain);
         ["tool", "inputDepth", "processDepth", "encoder", "decode",
          "upscaleRatio", "upscaleStrength", "denoiseStrength",
-         "framerateMultiplier", "framerateMode", "framerateEncoding"].forEach(function (id) {
+         "framerateMultiplier", "framerateMode", "framerateEncoding",
+         "framegenMode", "framegenMethod", "framegenTimestep",
+         "framegenMultiplier", "framegenFrameIndex", "framegenEncoding"].forEach(function (id) {
             if (p[id] != null)
                 $(id).value = p[id];
         });
