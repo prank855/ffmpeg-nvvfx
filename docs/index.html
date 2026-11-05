@@ -3,8 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <title>ffmpeg-nvvfx command builder</title>
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v=4">
 </head>
 <body>
 <header class="hero">
@@ -111,18 +114,11 @@
         <option value="cbr">CBR (constant bitrate)</option>
       </select>
     </div>
-    <div class="row" data-rc="bitrate">
-      <label for="bitrate">Bitrate</label>
-      <input id="bitrate" value="6000k">
+    <div class="row">
+      <label for="rcValue" id="rcValueLabel">Bitrate</label>
+      <input id="rcValue" value="6000k">
     </div>
-    <div class="row" data-rc="cq">
-      <label for="cq">CQ value</label>
-      <input id="cq" type="number" min="0" max="51" value="30">
-    </div>
-    <div class="row" data-rc="qp">
-      <label for="qp">QP value</label>
-      <input id="qp" type="number" min="0" max="51" value="20">
-    </div>
+    <p class="help" id="rcHelp">VBR and CBR use a target bitrate.</p>
     <div class="row">
       <label for="multipass">Multipass</label>
       <select id="multipass">
@@ -197,7 +193,7 @@
   <p>Static command builder. NVIDIA runtime DLLs and models are not distributed here.</p>
 </footer>
 
-<script src="generator.js"></script>
-<script src="app.js"></script>
+<script src="generator.js?v=4"></script>
+<script src="app.js?v=4"></script>
 </body>
 </html>

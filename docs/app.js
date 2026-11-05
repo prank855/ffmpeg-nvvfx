@@ -50,6 +50,43 @@
         }
     };
 
+    var rcState = { vbr: "6000k", cbr: "6000k", cq: "30", constqp: "20" };
+    var lastRc = "vbr";
+
+    function applyRcField(rc) {
+        var input = $("rcValue");
+        var label = $("rcValueLabel");
+        var help = $("rcHelp");
+        input.removeAttribute("min");
+        input.removeAttribute("max");
+        input.removeAttribute("step");
+        if (rc === "vbr" || rc === "cbr") {
+            label.textContent = "Bitrate";
+            input.type = "text";
+            input.value = rcState[rc] || "6000k";
+            input.placeholder = "6000k";
+            help.textContent = "VBR and CBR use a target bitrate.";
+        } else if (rc === "cq") {
+            label.textContent = "CQ value";
+            input.type = "number";
+            input.min = "0";
+            input.max = "51";
+            input.step = "1";
+            input.value = rcState[rc] || "30";
+            input.placeholder = "30";
+            help.textContent = "CQ: lower value is better quality (0-51).";
+        } else {
+            label.textContent = "QP value";
+            input.type = "number";
+            input.min = "0";
+            input.max = "51";
+            input.step = "1";
+            input.value = rcState[rc] || "20";
+            input.placeholder = "20";
+            help.textContent = "Constant QP: lower value is better quality (0-51).";
+        }
+    }
+
     function option(value, label, selected) {
         var o = document.createElement("option");
         o.value = value;
@@ -204,9 +241,9 @@
             preset: value("preset"),
             tune: value("tune"),
             rc: value("rc"),
-            bitrate: value("bitrate"),
-            cq: value("cq"),
-            qp: value("qp"),
+            bitrate: (value("rc") === "vbr" || value("rc") === "cbr") ? value("rcValue") : rcState.vbr,
+            cq: value("rc") === "cq" ? value("rcValue") : rcState.cq,
+            qp: value("rc") === "constqp" ? value("rcValue") : rcState.qp,
             multipass: value("multipass"),
             lookahead: value("lookahead"),
             spatialAq: checked("spatialAq"),
@@ -222,6 +259,12 @@
     }
 
     function update() {
+        var rc = value("rc");
+        if (rc !== lastRc) {
+            rcState[lastRc] = value("rcValue");
+            lastRc = rc;
+            applyRcField(rc);
+        }
         var chain = readChain();
         var hasHDR = chain.some(function (e) { return e.effect === "hdr"; });
         var hasArtifact = chain.some(function (e) { return e.effect === "artifact"; });
@@ -242,15 +285,6 @@
 
         document.querySelectorAll("[data-show='depth']").forEach(function (el) {
             el.classList.toggle("is-hidden", vsrStages.length === 0);
-        });
-
-        document.querySelectorAll("[data-rc]").forEach(function (el) {
-            var kind = el.getAttribute("data-rc");
-            var rc = value("rc");
-            el.classList.toggle("is-hidden",
-                !((kind === "bitrate" && (rc === "vbr" || rc === "cbr")) ||
-                  (kind === "cq" && rc === "cq") ||
-                  (kind === "qp" && rc === "constqp")));
         });
 
         var notes = [];
@@ -331,6 +365,7 @@
         }
     });
 
+    applyRcField("vbr");
     renderChain(G.defaults.chain);
     update();
 }());
