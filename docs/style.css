@@ -215,3 +215,80 @@ footer {
   .row { grid-template-columns: 1fr; gap: 6px; }
   .checks { flex-direction: column; gap: 8px; }
 }
+
+/* Effect chain */
+.effect-labels,
+.effect-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) 82px 88px auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.effect-labels {
+  margin: 4px 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.chain { display: grid; gap: 8px; }
+
+.effect-row select,
+.effect-row input {
+  width: 100%;
+  min-height: 38px;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfd;
+  font: inherit;
+}
+
+.effect-buttons { display: flex; gap: 4px; }
+
+.effect-buttons button.small {
+  padding: 7px 9px;
+  min-width: 34px;
+  font-size: 14px;
+}
+
+.chain-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.help {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 8px 0 0;
+}
+
+.advanced {
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
+.advanced summary {
+  cursor: pointer;
+  font-weight: 700;
+  margin-bottom: 10px;
+}
+
+input:disabled,
+select:disabled {
+  opacity: .55;
+  cursor: not-allowed;
+}
+
+@media (max-width: 760px) {
+  .effect-labels { display: none; }
+  .effect-row { grid-template-columns: 1fr; }
+  .effect-buttons { justify-content: flex-end; }
+}

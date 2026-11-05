@@ -11,7 +11,7 @@
   <div class="wrap">
     <p class="eyebrow">ffmpeg-nvvfx</p>
     <h1>Build your NVIDIA VFX ffmpeg command</h1>
-    <p class="lede">Pick what you want. Copy the command. No NVIDIA DLLs are bundled.</p>
+    <p class="lede">Chain effects, pick NVENC rate control, copy the command. No NVIDIA DLLs are bundled.</p>
     <p class="links">
       <a href="https://github.com/prank855/ffmpeg-nvvfx">GitHub</a>
       <a href="https://github.com/prank855/ffmpeg-nvvfx/releases">Releases</a>
@@ -43,53 +43,31 @@
       </select>
     </div>
 
-    <h2>2. Effect</h2>
+    <h2>2. Effects</h2>
+    <div class="effect-labels">
+      <span>Effect</span><span>Quality</span><span>Scale</span><span>Strength</span><span></span>
+    </div>
+    <div id="chain" class="chain"></div>
+    <div class="chain-actions">
+      <button id="addEffect" type="button" class="secondary">+ Add effect</button>
+      <span class="help">Artifact first, HDR last. 10-bit VSR needs P010 or X2BGR10 after promotion.</span>
+    </div>
+
     <div class="row">
-      <label for="mode">Mode</label>
-      <select id="mode">
-        <option value="superres">Super resolution</option>
-        <option value="denoise">Denoise</option>
-        <option value="deblur">Deblur</option>
-        <option value="artifact">Artifact reduction</option>
-        <option value="artifact+superres">Artifact + super resolution</option>
-        <option value="hdr">SDR → HDR10</option>
-      </select>
-    </div>
-    <div class="row" data-show="vsr">
-      <label for="quality">Quality</label>
-      <select id="quality">
-        <option value="low">low</option>
-        <option value="medium">medium</option>
-        <option value="high">high</option>
-        <option value="ultra" selected>ultra</option>
-      </select>
-    </div>
-    <div class="row" data-show="artifact">
-      <label for="artifactQuality">Artifact quality</label>
-      <select id="artifactQuality">
-        <option value="conservative" selected>conservative</option>
-        <option value="aggressive">aggressive</option>
-      </select>
-    </div>
-    <div class="row" data-show="scale">
-      <label for="scale">Scale</label>
-      <select id="scale">
-        <option value="2" selected>2x</option>
-        <option value="3">3x</option>
-        <option value="4">4x</option>
+      <label for="inputDepth">Input depth</label>
+      <select id="inputDepth">
+        <option value="8" selected>8-bit source</option>
+        <option value="10">10-bit source</option>
       </select>
     </div>
     <div class="row" data-show="depth">
-      <label for="bitDepth">Bit depth</label>
-      <select id="bitDepth">
-        <option value="8" selected>8-bit BGRA → NV12</option>
-        <option value="10">true 10-bit RGB10A2 → P010</option>
+      <label for="processDepth">Process/output</label>
+      <select id="processDepth">
+        <option value="8" selected>8-bit</option>
+        <option value="10">10-bit RGB10A2 → P010</option>
       </select>
     </div>
-    <div class="row" data-show="strength">
-      <label for="strength">Strength</label>
-      <input id="strength" type="number" min="0" max="1" step="0.05" placeholder="1.0 (default)">
-    </div>
+    <p class="help">8-bit source + 10-bit processing inserts a P010 promotion before VSR. Source detail stays 8-bit; the pipeline and encode are 10-bit.</p>
 
     <h2>3. Decode &amp; encode</h2>
     <div class="row">
@@ -117,13 +95,67 @@
       </select>
     </div>
     <div class="row">
+      <label for="tune">Tune</label>
+      <select id="tune">
+        <option value="hq" selected>hq</option>
+        <option value="ll">ll</option>
+        <option value="ull">ull</option>
+      </select>
+    </div>
+    <div class="row">
+      <label for="rc">Rate control</label>
+      <select id="rc">
+        <option value="vbr" selected>VBR (bitrate)</option>
+        <option value="cq">CQ (constant quality)</option>
+        <option value="constqp">Constant QP</option>
+        <option value="cbr">CBR (constant bitrate)</option>
+      </select>
+    </div>
+    <div class="row" data-rc="bitrate">
       <label for="bitrate">Bitrate</label>
       <input id="bitrate" value="6000k">
+    </div>
+    <div class="row" data-rc="cq">
+      <label for="cq">CQ value</label>
+      <input id="cq" type="number" min="0" max="51" value="30">
+    </div>
+    <div class="row" data-rc="qp">
+      <label for="qp">QP value</label>
+      <input id="qp" type="number" min="0" max="51" value="20">
+    </div>
+    <div class="row">
+      <label for="multipass">Multipass</label>
+      <select id="multipass">
+        <option value="disabled">disabled</option>
+        <option value="qres" selected>qres (2-pass quarter-res)</option>
+        <option value="fullres">fullres (2-pass full-res)</option>
+      </select>
     </div>
     <div class="row">
       <label for="duration">Limit</label>
       <input id="duration" placeholder="00:05:00 (blank = full)">
     </div>
+
+    <details class="advanced">
+      <summary>Advanced NVENC</summary>
+      <div class="row">
+        <label for="lookahead">Lookahead</label>
+        <input id="lookahead" type="number" min="0" max="64" value="32">
+      </div>
+      <div class="row">
+        <label for="bf">B-frames</label>
+        <input id="bf" type="number" min="0" max="4" value="4">
+      </div>
+      <div class="row">
+        <label for="gop">GOP</label>
+        <input id="gop" type="number" min="0" max="2000" value="240">
+      </div>
+      <div class="checks">
+        <label><input id="spatialAq" type="checkbox" checked> spatial AQ</label>
+        <label><input id="temporalAq" type="checkbox" checked> temporal AQ</label>
+      </div>
+    </details>
+
     <div class="checks">
       <label><input id="copyAudio" type="checkbox" checked> all audio</label>
       <label><input id="copySubs" type="checkbox" checked> subtitles</label>
@@ -144,6 +176,7 @@
     <div class="presets">
       <button type="button" data-preset="8bit">8-bit upscale</button>
       <button type="button" data-preset="10bit">10-bit upscale</button>
+      <button type="button" data-preset="8to10">8-bit → 10-bit</button>
       <button type="button" data-preset="denoise">Denoise</button>
       <button type="button" data-preset="artifact">Artifact</button>
       <button type="button" data-preset="chain">Artifact + upscale</button>
@@ -154,7 +187,7 @@
     <ul class="quick">
       <li>Install the NVIDIA VFX SDK 1.3 features, or the <code>nvidia-vfx</code> wheel + Program Files 0.7.6 runtime.</li>
       <li>Point <code>NVVFX_LIB_DIR</code> at the flat <code>nvvfx\libs</code> folder, or put it beside <code>ffmpeg-nvvfx.exe</code>.</li>
-      <li>10-bit needs P010/X2BGR10 input. HDR input should use <code>mode=hdr</code>.</li>
+      <li>For 8-bit → 10-bit, the builder adds <code>scale_d3d11=format=p010</code> before <code>nvvfx</code>.</li>
       <li>Artifact reduction is limited to 1920x1080.</li>
     </ul>
   </section>

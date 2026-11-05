@@ -74,6 +74,9 @@ ffmpeg-nvvfx -hwaccel d3d11va -hwaccel_output_format d3d11 -i in.mkv \
 **8-bit filter, 10-bit encode:** append `scale_d3d11=format=p010` instead.
 This upconverts; use `bit_depth=10` above for a true 10-bit pipeline.
 
+**8-bit source, 10-bit pipeline:** insert `scale_d3d11=format=p010` before
+`nvvfx` (the command builder does this for you).
+
 **SDR → HDR10:**
 
 ```bash
