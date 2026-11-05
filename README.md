@@ -3,7 +3,7 @@
 A Windows-focused FFmpeg fork adding the `nvvfx` filter for **NVIDIA Video
 Effects** on D3D11 hardware frames.
 
-Based on FFmpeg master (`2546b6f061`). Upstream project: <https://ffmpeg.org>.
+Based on FFmpeg master. Upstream project: <https://ffmpeg.org>.
 
 ## What it does
 
