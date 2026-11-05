@@ -55,3 +55,7 @@
 /libavfilter/vulkan/*.c
 /.*/
 !/.forgejo/
+
+# Local test media
+/in.mkv
+/out.mkv
